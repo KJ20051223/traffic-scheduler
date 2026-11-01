@@ -28,11 +28,23 @@ class NoPacer:
 class FixtureHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     payloads = []
+    requests = {}
 
     def log_message(self, *args):
         pass
 
     def do_GET(self):
+        self.requests[self.path] = self.requests.get(self.path, 0) + 1
+        if self.path in ('/always503', '/always403', '/always418', '/retry-after') or (
+                self.path == '/flaky' and self.requests[self.path] == 1):
+            status = {'/always403': 403, '/always418': 418, '/retry-after': 429}.get(self.path, 503)
+            self.send_response(status)
+            self.send_header('Content-Length', '0')
+            self.send_header('Connection', 'close')
+            if self.path == '/retry-after':
+                self.send_header('Retry-After', '120')
+            self.end_headers()
+            return
         if self.path == '/redirect':
             self.send_response(302)
             self.send_header('Location', '/file')
@@ -96,6 +108,7 @@ class Tests(unittest.TestCase):
         self.config = t.default_config()
         self.net = LocalNetwork(self.server.server_address)
         self.item = {'region': 'cn', 'mbps': 10}
+        FixtureHandler.requests = {}
 
     def target(self, path, kind='range'):
         return {'name': 'fixture', 'url': 'http://example.com' + path, 'kind': kind}
@@ -376,7 +389,7 @@ class Tests(unittest.TestCase):
         t.atomic_json(self.path, self.data)
         before = self.path.read_bytes()
         with patch.object(t, 'Network', return_value=self.net), patch.object(t, 'Pacer', NoPacer):
-            t.real_test(self.config, self.directory, 0.000017)
+            t.real_test(self.config, self.directory, 0.000017, rng=random.Random(0))
         result = json.loads((self.directory / 'last-test.json').read_text())
         self.assertNotIn('upload', result)
         self.assertEqual(result['download']['confirmed'], 17)
@@ -388,7 +401,7 @@ class Tests(unittest.TestCase):
         self.net.cache = {}
         self.config['directions']['download']['targets'] = [self.target('/truncated'), self.target('/file')]
         with patch.object(t, 'Network', return_value=self.net), patch.object(t, 'Pacer', NoPacer):
-            t.real_test(self.config, self.directory, 0.000017)
+            t.real_test(self.config, self.directory, 0.000017, rng=random.Random(0))
         result = json.loads((self.directory / 'last-test.json').read_text())
         self.assertEqual(result['download']['confirmed'], 17)
         self.assertEqual(result['download']['bytes'], 22)
@@ -412,6 +425,80 @@ class Tests(unittest.TestCase):
                 t.transfer(self.net, 'download', self.item, self.target('/file'), 17,
                            self.directory, self.data, self.path, InspectPacer())
         self.assertTrue(handles[-1].closed)
+
+    def test_source_order_varies_and_does_not_mutate_builtins(self):
+        original = list(t.targets(self.config, 'download'))
+        orders = [tuple(item['url'] for item in t.shuffled_targets(self.config, 'download', random.Random(seed)))
+                  for seed in range(8)]
+        self.assertGreater(len(set(orders)), 1)
+        self.assertEqual(t.targets(self.config, 'download'), original)
+        self.assertEqual(len(original), 6)
+        self.assertEqual(len({t.parse_url(item['url']).hostname for item in original}), 6)
+
+    def test_transient_failure_retries_after_delay_and_then_succeeds(self):
+        self.config['directions']['download'].update(daily_bytes=17, targets=[self.target('/flaky')])
+        health, clock = {}, [1000.0]
+        with patch.object(t, 'Pacer', NoPacer), patch.object(t.time, 'time', side_effect=lambda: clock[0]), \
+                patch.object(t.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            t.run_session(self.config, self.data, self.path, self.directory, self.net, health=health, rng=random.Random(0))
+        self.assertEqual(FixtureHandler.requests['/flaky'], 2)
+        self.assertEqual(self.data['download']['confirmed'], 17)
+        self.assertGreaterEqual(clock[0], 1002)
+        self.assertEqual(health, {})
+
+    def test_repeated_503_is_bounded_to_three_attempts(self):
+        self.config['directions']['download'].update(daily_bytes=17, targets=[self.target('/always503')])
+        health, clock = {}, [1000.0]
+        with patch.object(t, 'Pacer', NoPacer), patch.object(t.time, 'time', side_effect=lambda: clock[0]), \
+                patch.object(t.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            with self.assertRaisesRegex(OSError, '最多尝试 3 次'):
+                t.run_session(self.config, self.data, self.path, self.directory, self.net, health=health)
+        self.assertEqual(FixtureHandler.requests['/always503'], 3)
+        self.assertEqual(self.data['download']['bytes'], 0)
+        self.assertGreaterEqual(clock[0], 1007)
+        self.assertAlmostEqual(next(iter(health.values()))['until'] - clock[0], 300)
+
+    def test_403_and_418_skip_without_hammering_and_keep_cooldown(self):
+        for path in ('/always403', '/always418'):
+            self.config['directions']['download'].update(daily_bytes=17, targets=[self.target(path)])
+            health = {}
+            with patch.object(t, 'Pacer', NoPacer), patch.object(t.time, 'time', return_value=1000), \
+                    patch.object(t.time, 'sleep', side_effect=AssertionError('denied target must not loop')):
+                with self.assertRaises(OSError):
+                    t.run_session(self.config, self.data, self.path, self.directory, self.net, health=health)
+            self.assertEqual(FixtureHandler.requests[path], 1)
+            self.assertEqual(next(iter(health.values()))['until'], 2800)
+            self.assertEqual(self.data['download']['bytes'], 0)
+
+    def test_retry_after_defers_request_instead_of_ignoring_server_delay(self):
+        self.config['directions']['download'].update(daily_bytes=17, targets=[self.target('/retry-after')])
+        health = {}
+        with patch.object(t, 'Pacer', NoPacer), patch.object(t.time, 'time', return_value=1000), \
+                patch.object(t.time, 'sleep', side_effect=AssertionError('long delay should defer to next session')):
+            with self.assertRaisesRegex(OSError, '冷却'):
+                t.run_session(self.config, self.data, self.path, self.directory, self.net, health=health)
+        self.assertEqual(FixtureHandler.requests['/retry-after'], 1)
+        self.assertEqual(next(iter(health.values()))['until'], 1120)
+
+    def test_saved_cooldown_skips_denied_target_in_later_session(self):
+        denied, good = self.target('/always403'), self.target('/file')
+        self.config['directions']['download'].update(daily_bytes=17, targets=[denied, good])
+        health = {denied['url']: {'until': 2000, 'status': 403, 'error': 'denied'}}
+        t.atomic_json(self.directory / 'source-health.json', health)
+        with patch.object(t.time, 'time', return_value=1000), patch.object(t, 'Pacer', NoPacer):
+            loaded = t.load_health(self.directory)
+            t.run_session(self.config, self.data, self.path, self.directory, self.net, health=loaded, rng=random.Random(0))
+        self.assertNotIn('/always403', FixtureHandler.requests)
+        self.assertEqual(self.data['download']['confirmed'], 17)
+        with patch.object(t.time, 'time', return_value=3000):
+            self.assertEqual(t.load_health(self.directory), {})
+
+    def test_retry_after_http_date_and_invalid_values(self):
+        with patch.object(t.time, 'time', return_value=0):
+            self.assertEqual(t.retry_delay('Thu, 01 Jan 1970 00:02:00 GMT'), 120)
+            self.assertEqual(t.retry_delay('60'), 60)
+            for value in ('bad', 'nan', 'inf', '-1', ''):
+                self.assertEqual(t.retry_delay(value), 0)
 
 
 if __name__ == '__main__':

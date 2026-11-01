@@ -1,4 +1,4 @@
-# Traffic Scheduler 2.1.0
+# Traffic Scheduler 2.1.1
 
 Ubuntu **仅下行**流量调度：每天按北京时间随机分散下载，默认 **20 GB/天、5 Mbps、中国大陆**。额度、速度、地区和自定义下载地址均可设置。已移除上传任务、上传节点和方向选择。
 
@@ -51,10 +51,21 @@ Linux CI 检查正常完成、部分失败和中断后的清理，还检查**下
 
 | 区域 | 内置源 | 下载内容 |
 | --- | --- | --- |
-| 大陆 `cn` | 华为云 mirrors / repo | Ubuntu Server ISO 的部分字节，不安装、不执行 |
+| 大陆 `cn` | 南京大学、中科大、清华、北外、浙大、中科院软件所（6 个） | Ubuntu Server ISO 的部分字节，不安装、不执行 |
 | 海外 `overseas`（含港澳台） | Cloudflare Speed Test | 测速用二进制数据 |
 
-先前失败的华科下载地址和所有上传节点均已移除。空响应、错误网页、403、5xx 或不遵守 Range 会拒绝并换源。
+先前失败的华科、用户收到 418/403 的华为云地址和所有上传节点均已移除。华为云开发端偶尔仍可用，用户端失败的确切原因尚未确认，不能把同一运营商的两个域名视作独立备份。阿里云官方镜像目录公告暂停公网 ISO 下载，也未加入列表。
+
+### 每次随机选择与自动重试
+
+- 每次真实测试、每个调度时段都重新打乱全部候选的顺序，从可用候选中随机开始；本次源能正常下载就继续用它。下一时段重新随机，随机结果允许重复。
+- 第一个失败后自动切换其他候选，不要求先把所有源逐个测试一遍；都保持同样的地区校验和限速。
+- 超时、连接重置/断连、HTTP 408/425/429/5xx 等临时错误，每源每时段最多尝试 **3 次**（含首次），受时段截止和剩余额度限制。优先换源；再次尝试前分别等待约 **2 秒、5 秒**，加最多 1 秒随机间隔。
+- 重试耗尽后该源冷却 **5 分钟**；403、418 等明确拒绝不会当场连续重试，而是跳过并冷却 **30 分钟**。
+- 尊重 `Retry-After` 秒数或 HTTP 日期；等待超过 15 秒时留到后续时段尝试，不占住当前任务长期等待。
+- 冷却状态保存到 `/var/lib/traffic-scheduler/source-health.json`，后续进程继续使用。全部不可用时记录错误；运行中的 timer 后续随机时段会再尝试。**首次安装实测失败仍保持 timer 停用，需要实测成功后再启用**，不会自行跳过验证。
+
+开发端对这 6 个源各进行了 64 KiB Range 探测和 10 MB / 5 Mbps 下载实测；实际 IP 均查询为 CN。开发端通过不代表所有来源均可访问，也未验证长期 20 GB。你的服务器会重新随机选源实测。
 
 大陆只连接查询归属为 CN 的公网 IPv4；海外只允许非 CN。连接固定到已校验 IP，保留 HTTPS 证书校验，重定向重新校验地区，不跨区域回退。归属缓存 24 小时，地理库可能有误差，不能保证路由或机房位置。
 
@@ -87,6 +98,9 @@ sudo bash install-traffic-scheduler.sh --gb 12 --mbps 3 --region cn --url 'https
 sudo traffic-scheduler status
 traffic-scheduler --version
 
+# 所有当前目标、冷却剩余时间及上次错误
+sudo traffic-scheduler sources
+
 # 随时真实下载 10 MB，使用保存的限速和地区，内容自动清理
 sudo -u traffic-scheduler traffic-scheduler test --mb 10
 
@@ -99,7 +113,7 @@ sudo systemctl disable --now traffic-scheduler.timer
 sudo systemctl stop traffic-scheduler.service
 ```
 
-修改推荐重新运行安装器，明确传参数，它会停止任务、保存、实测再激活。已安装 2.1.0 也可：
+修改推荐重新运行安装器，明确传参数，它会停止任务、保存、实测再激活。已安装 2.1.1 也可：
 
 ```bash
 sudo systemctl disable --now traffic-scheduler.timer
@@ -128,4 +142,6 @@ python3 -m unittest -v
 bash -n install.sh
 ```
 
-CI 在 Ubuntu/Python 3.8、3.12 覆盖配置迁移、交互和命令行保存、实际请求额度与限速参数、随机计划、日期切换、区域校验、失败换源、并发锁、崩溃预留和匿名文件清理。开发端仅做小流量联网实测，未用公共源持续下载 20 GB。
+CI 在 Ubuntu/Python 3.8、3.12 覆盖配置迁移、交互和命令行保存、实际请求额度与限速参数、随机计划、日期切换、区域校验、源顺序随机、不修改内置表、失败换源、有间隔的有限重试、Retry-After、403/418 冷却、重启延续冷却、并发锁、崩溃预留和匿名文件清理。开发端仅做小流量联网实测，未用公共源持续下载 20 GB。
+
+源目录参考：[南京大学](https://mirrors.nju.edu.cn/ubuntu-releases/24.04/)、[中科大说明](https://mirrors.ustc.edu.cn/help/ubuntu-releases.html)、[阿里云公网 ISO 暂停公告](https://mirrors.aliyun.com/ubuntu-releases/24.04/)。

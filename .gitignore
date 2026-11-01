@@ -5,3 +5,4 @@ config.json
 quota-*.json
 geo.json
 last-test.json
+source-health.json

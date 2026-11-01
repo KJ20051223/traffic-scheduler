@@ -66,6 +66,7 @@ cat > /usr/local/bin/traffic-scheduler <<'TRAFFIC_SCHEDULER_PY'
 import argparse
 import contextlib
 import datetime as dt
+from email.utils import parsedate_to_datetime
 import hashlib
 import http.client
 import ipaddress
@@ -83,7 +84,7 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '2.1.0'
+VERSION = '2.1.1'
 CONFIG = Path('/etc/traffic-scheduler/config.json')
 STATE = Path('/var/lib/traffic-scheduler')
 BJ = dt.timezone(dt.timedelta(hours=8))
@@ -95,12 +96,16 @@ LABEL = {'download': '下行'}
 ERRORS = (OSError, ValueError, http.client.HTTPException)
 
 # Public download sources. Setup validates on the user's host.
-# Failed/restricted HUST/USTC/SJTU endpoints deliberately are not in these defaults.
+# Independent mirror operators; each session shuffles a copy, preserving this list.
 BUILTINS = {
     'download': {
         'cn': [
-            {'name': '华为云镜像', 'kind': 'range', 'url': 'https://mirrors.huaweicloud.com/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso'},
-            {'name': '华为云仓库', 'kind': 'range', 'url': 'https://repo.huaweicloud.com/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso'},
+            {'name': '南京大学', 'kind': 'range', 'url': 'https://mirrors.nju.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso'},
+            {'name': '中国科学技术大学', 'kind': 'range', 'url': 'https://mirrors.ustc.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso'},
+            {'name': '清华大学', 'kind': 'range', 'url': 'https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso'},
+            {'name': '北京外国语大学', 'kind': 'range', 'url': 'https://mirrors.bfsu.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso'},
+            {'name': '浙江大学', 'kind': 'range', 'url': 'https://mirrors.zju.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso'},
+            {'name': '中科院软件所', 'kind': 'range', 'url': 'https://mirror.iscas.ac.cn/ubuntu-releases/24.04/ubuntu-24.04.4-live-server-amd64.iso'},
         ],
         'overseas': [
             {'name': 'Cloudflare', 'kind': 'generated', 'url': 'https://speed.cloudflare.com/__down'},
@@ -111,6 +116,35 @@ BUILTINS = {
 
 class Stop(Exception):
     pass
+
+
+class DownloadHTTPError(OSError):
+    def __init__(self, status, address, country, retry_after=None):
+        super().__init__('下载 HTTP {}，目标 IP={} ({})'.format(status, address, country))
+        self.status = status
+        self.retry_after = retry_delay(retry_after)
+
+
+def retry_delay(value):
+    if not value:
+        return 0
+    try:
+        seconds = float(value)
+    except (ValueError, TypeError):
+        try:
+            moment = parsedate_to_datetime(value)
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=dt.timezone.utc)
+            seconds = moment.timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return 0
+    return max(0, seconds) if math.isfinite(seconds) else 0
+
+
+def transient(error):
+    if isinstance(error, DownloadHTTPError):
+        return error.status in (408, 425, 429) or 500 <= error.status <= 599
+    return not isinstance(error, (ValueError, ssl.SSLCertVerificationError))
 
 
 def now():
@@ -174,6 +208,12 @@ def parse_url(url):
 def targets(config, direction):
     item = config['directions'][direction]
     return item.get('targets') or BUILTINS[direction][item['region']]
+
+
+def shuffled_targets(config, direction, rng=None):
+    result = list(targets(config, direction))
+    (rng or random.SystemRandom()).shuffle(result)
+    return result
 
 
 def validate(config):
@@ -448,7 +488,7 @@ def transfer(network, direction, item, target, amount, directory, data, path, pa
                 conn.close()
                 continue
             if response.status not in (200, 206):
-                raise OSError('下载 HTTP {}'.format(response.status))
+                raise DownloadHTTPError(response.status, address, country, response.getheader('Retry-After'))
             if 'html' in response.getheader('Content-Type', '').lower():
                 raise OSError('下载端返回网页，可能被限制访问')
             if response.getheader('Content-Encoding', 'identity').lower() != 'identity':
@@ -526,21 +566,35 @@ def pick_direction(config, data, metric='bytes'):
     return min(choices, key=lambda d: data[d][metric] / config['directions'][d]['daily_bytes']) if choices else None
 
 
-def run_session(config, data, path, directory, network, metric='bytes'):
+def run_session(config, data, path, directory, network, metric='bytes', health=None, rng=None):
+    health = health if health is not None else {}
+    rng = rng or random.SystemRandom()
+    pools = {d: shuffled_targets(config, d, rng) for d in DIRECTIONS}
     selected = {}
     failed = {d: set() for d in DIRECTIONS}
+    attempts = {}
     pacers = {d: Pacer(config['directions'][d]['mbps']) for d in DIRECTIONS}
     while True:
         direction = pick_direction(config, data, metric)
         if direction is None:
             return True
         item = config['directions'][direction]
-        available = [t for t in targets(config, direction) if t['url'] not in failed[direction]]
+        candidates = [t for t in pools[direction] if t['url'] not in failed[direction]]
+        available = [t for t in candidates if health.get(t['url'], {}).get('until', 0) <= time.time()]
         if not available:
-            raise OSError('{}所有目标均失败；请执行 test 查看详情或重新配置'.format(LABEL[direction]))
+            if candidates:
+                wait = max(0, min(health.get(t['url'], {}).get('until', 0) for t in candidates) - time.time())
+                if wait <= 15:
+                    log('暂不可用，等待 {:.1f} 秒后按随机候选顺序重试'.format(wait))
+                    time.sleep(max(0.01, wait))
+                    continue
+                raise OSError('所有下载源均在冷却，最早约 {:.0f} 秒后可重试；请稍后 test 或更换目标'.format(wait))
+            raise OSError('{}所有目标均失败（临时错误每源最多尝试 3 次）；请稍后 test 或更换目标'.format(LABEL[direction]))
         target = selected.get(direction, available[0])
         if target not in available:
             target = available[0]
+        if selected.get(direction) != target:
+            log('本次随机候选选择：{}（共 {} 个目标，失败自动换源）'.format(target['name'], len(pools[direction])))
         # At a low configured speed, finish a request inside a short time slice.
         amount = min(PIECE, max(1, int(item['mbps'] * 125000 * 8)),
                      item['daily_bytes'] - data[direction][metric])
@@ -550,9 +604,24 @@ def run_session(config, data, path, directory, network, metric='bytes'):
             selected[direction] = target
             if data[direction]['confirmed'] <= before:
                 raise OSError('没有实际确认的数据传输')
+            health.pop(target['url'], None)
         except ERRORS as error:
             log('{}目标失败 {}: {}'.format(LABEL[direction], target['name'], error))
-            failed[direction].add(target['url'])
+            url = target['url']
+            attempts[url] = attempts.get(url, 0) + 1
+            retryable = transient(error)
+            if retryable and attempts[url] < 3:
+                delay = (2 if attempts[url] == 1 else 5) + rng.uniform(0, 1)
+                delay = max(delay, getattr(error, 'retry_after', 0))
+                log('将换源或在 {:.1f} 秒后重试 {}（本时段第 {}/3 次尝试已失败）'.format(
+                    delay, target['name'], attempts[url]))
+            else:
+                delay = 300 if retryable else 1800
+                delay = max(delay, getattr(error, 'retry_after', 0))
+                failed[direction].add(url)
+                log('{}本时段跳过，冷却 {} 秒'.format(target['name'], delay))
+            health[url] = {'until': time.time() + delay, 'error': str(error),
+                           'status': getattr(error, 'status', None)}
             selected.pop(direction, None)
 
 
@@ -562,6 +631,16 @@ def load_geo(directory):
         data = json.loads(path.read_text(encoding='utf-8'))
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
+        return {}
+
+
+def load_health(directory):
+    try:
+        data = json.loads((directory / 'source-health.json').read_text(encoding='utf-8'))
+        return {url: entry for url, entry in data.items()
+                if isinstance(entry, dict) and type(entry.get('until')) in (int, float)
+                and math.isfinite(entry['until']) and entry['until'] > time.time()}
+    except (OSError, ValueError, AttributeError):
         return {}
 
 
@@ -594,6 +673,7 @@ def tick(config, directory):
         if seconds < 3:
             return 0
         network = Network(load_geo(directory))
+        health = load_health(directory)
         item = config['directions']['download']
         log('执行下行：每日 {:g} GB，限速 {:g} Mbps，区域 {}；今日已计量 {:.6f} GB'.format(
             item['daily_bytes'] / 1e9, item['mbps'], item['region'], data['download']['bytes'] / 1e9))
@@ -601,16 +681,17 @@ def tick(config, directory):
             with deadline(seconds):
                 jitter = min(data['plan']['jitter'], max(0, seconds - 3))
                 time.sleep(jitter)
-                run_session(config, data, path, directory, network)
+                run_session(config, data, path, directory, network, health=health)
                 log('今日配置的计量额度已用完，已确认接收量可通过 status 查看')
         except Stop:
             log('本次随机时段结束，下行={:.6f} GB'.format(data['download']['bytes'] / 1e9))
         finally:
             atomic_json(directory / 'geo.json', network.cache)
+            atomic_json(directory / 'source-health.json', health)
         return 0
 
 
-def real_test(config, directory, megabytes=10):
+def real_test(config, directory, megabytes=10, rng=None):
     # Independent test ledger: never resets or spends the scheduled quota silently.
     directory.mkdir(parents=True, exist_ok=True)
     size = int(megabytes * 1_000_000)
@@ -618,6 +699,7 @@ def real_test(config, directory, megabytes=10):
     for d in DIRECTIONS:
         test_config['directions'][d]['daily_bytes'] = size
     network = Network(load_geo(directory))
+    health = load_health(directory)
     item = config['directions']['download']
     log('仅下行实测 {:g} MB；配置每日 {:g} GB，限速 {:g} Mbps，区域 {}'.format(
         megabytes, item['daily_bytes'] / 1e9, item['mbps'], item['region']))
@@ -627,9 +709,11 @@ def real_test(config, directory, megabytes=10):
         start = time.monotonic()
         try:
             with deadline(max(180, remaining_seconds(test_config, data) * 4 + 60)):
-                run_session(test_config, data, test_dir / 'test.json', test_dir, network, metric='confirmed')
+                run_session(test_config, data, test_dir / 'test.json', test_dir, network,
+                            metric='confirmed', health=health, rng=rng)
         finally:
             atomic_json(directory / 'geo.json', network.cache)
+            atomic_json(directory / 'source-health.json', health)
         for d in DIRECTIONS:
             if test_config['directions'][d]['enabled'] and data[d]['confirmed'] < size:
                 raise OSError('{}实测未完成：确认 {} / {} 字节'.format(LABEL[d], data[d]['confirmed'], size))
@@ -696,6 +780,7 @@ def configure(path, args):
     print('仅下行 | 每日 {:g} GB | 限速 {:g} Mbps | 区域 {} | {}'.format(
         item['daily_bytes'] / 1e9, item['mbps'], item['region'], '自定义目标' if item['targets'] else '内置目标'))
     print('需要真实下载测试通过后再启用定时任务；修改设置不会清零当天进度。')
+    print('下载源：{} 个，本次测试和每个调度时段均随机排列，失败自动换源。'.format(len(targets(saved, 'download'))))
 
 
 def status(config, directory):
@@ -731,6 +816,7 @@ def main():
     settings.add_argument('--keep', action='store_true', help='保留已有数值并迁移为仅下行；首次使用默认值')
     commands.add_parser('tick', help='执行当前随机时间片')
     commands.add_parser('status', help='显示今日下行进度')
+    commands.add_parser('sources', help='显示当前下载源和冷却状态')
     test = commands.add_parser('test', help='任何时间真实下载，默认 10MB')
     test.add_argument('--mb', type=float, default=10)
     args = parser.parse_args()
@@ -741,6 +827,15 @@ def main():
     print('读取配置：' + str(args.config.resolve()), flush=True)
     if args.command == 'status':
         status(config, args.state_dir)
+        return 0
+    if args.command == 'sources':
+        health = load_health(args.state_dir)
+        for item in targets(config, 'download'):
+            entry = health.get(item['url'], {})
+            wait = max(0, entry.get('until', 0) - time.time())
+            print('{} | {} | {}'.format(item['name'], '冷却 {:.0f} 秒'.format(wait) if wait else '可尝试', item['url']))
+            if wait:
+                print('  上次错误：' + str(entry.get('error', '未知')))
         return 0
     if args.command == 'test':
         if not math.isfinite(args.mb) or not 0.001 <= args.mb <= 1000:
