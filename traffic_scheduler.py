@@ -21,7 +21,7 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '2.1.1'
+VERSION = '2.2.0'
 CONFIG = Path('/etc/traffic-scheduler/config.json')
 STATE = Path('/var/lib/traffic-scheduler')
 BJ = dt.timezone(dt.timedelta(hours=8))

@@ -1,10 +1,25 @@
-# Traffic Scheduler 2.1.1
+# Traffic Scheduler 2.2.0
 
-Ubuntu **仅下行**流量调度：每天按北京时间随机分散下载，默认 **20 GB/天、5 Mbps、中国大陆**。额度、速度、地区和自定义下载地址均可设置。已移除上传任务、上传节点和方向选择。
+Linux **仅下行**流量调度：每天按北京时间随机分散下载，默认 **20 GB/天、5 Mbps、中国大陆**。额度、速度、地区和自定义下载地址均可设置。已移除上传任务、上传节点和方向选择。
 
 ## 安装或升级
 
-适用于启用 systemd 的 Ubuntu 20.04+、Python 3.8+。已有安装直接覆盖升级，无需卸载。
+适用于运行 **systemd 239+** 的以下 Linux 系统，安装器自动安装依赖并选择 **Python 3.8+**。已有安装直接覆盖升级，无需卸载，保留配置及当天计数。
+
+| 系统 | 版本范围 | 包管理器 |
+| --- | --- | --- |
+| Ubuntu | 20.04+ | apt |
+| Debian | 11+ | apt |
+| RHEL、Rocky、AlmaLinux、Oracle Linux | 8+，软件源需提供 Python 3.8+ | dnf / yum |
+| CentOS Stream | 9+ | dnf |
+| Fedora | 40+ | dnf |
+| Amazon Linux | 2023 | dnf |
+| openSUSE | Leap 15.6+、Tumbleweed / Slowroll | zypper |
+| Arch Linux | 滚动发行版，系统已正常更新 | pacman |
+
+Linux Mint、Manjaro 等衍生系统会根据 `/etc/os-release` 的 `ID_LIKE` 选择相应安装方式，仍会检查实际工具和解释器。Alpine 默认 OpenRC、CentOS 7/8、Amazon Linux 2、未运行 systemd 的普通容器、Windows/macOS 不在当前支持范围。
+
+系统自带的软件源必须可用，安装器不会修改软件源、关闭 SELinux、升级整个系统或替换 `/usr/bin/python3`。RHEL 8 等默认 Python 较旧的系统会尝试安装独立的 Python 3.12 / 3.11 / 3.9；CLI、安装实测和 systemd 使用同一选定解释器。Arch 不执行 `pacman -Sy` 部分升级，软件源失效时提示用户先完成系统更新。
 
 下面明确设置 **每日下行 20 GB、最高 5 Mbps、大陆内置源**；把 `20` 和 `5` 改成需要的数字：
 
@@ -18,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/KJ20051223/traffic-scheduler/main/i
 sudo bash install-traffic-scheduler.sh
 ```
 
-没有 curl 时先执行 `sudo apt-get update && sudo apt-get install -y curl`。安装仍需 Ubuntu 软件源安装 Python、证书和时区数据。
+没有 curl 时，可先按系统安装：Debian/Ubuntu 使用 `apt-get update && apt-get install -y curl`；RPM 系使用 `dnf install -y curl`；openSUSE 使用 `zypper install curl`；Arch 使用 `pacman -S --needed curl`。以上软件安装命令须 root 或 sudo 权限。也可直接使用下面的手动上传方式。安装仍需系统软件源提供 Python、证书、时区及用户管理工具。
 
 ### 手动上传服务器
 
@@ -113,7 +128,7 @@ sudo systemctl disable --now traffic-scheduler.timer
 sudo systemctl stop traffic-scheduler.service
 ```
 
-修改推荐重新运行安装器，明确传参数，它会停止任务、保存、实测再激活。已安装 2.1.1 也可：
+修改推荐重新运行安装器，明确传参数，它会停止任务、保存、实测再激活。已安装 2.2.0 也可：
 
 ```bash
 sudo systemctl disable --now traffic-scheduler.timer
@@ -142,6 +157,10 @@ python3 -m unittest -v
 bash -n install.sh
 ```
 
-CI 在 Ubuntu/Python 3.8、3.12 覆盖配置迁移、交互和命令行保存、实际请求额度与限速参数、随机计划、日期切换、区域校验、源顺序随机、不修改内置表、失败换源、有间隔的有限重试、Retry-After、403/418 冷却、重启延续冷却、并发锁、崩溃预留和匿名文件清理。开发端仅做小流量联网实测，未用公共源持续下载 20 GB。
+CI 在 Python 3.8、3.12 运行核心测试，另用 Ubuntu、Debian、Rocky、AlmaLinux、Oracle Linux、CentOS Stream、Fedora、Amazon Linux、openSUSE、Arch 的发行版容器检查依赖安装、解释器选择、账户与配置读取权限、systemd 单元语法，并运行真实本地 HTTP 测试。发行版容器不运行完整 init，不等于逐一整机启动验收；正式安装仍要求 systemd 正在运行，并在使用者服务器真实下载 10 MB 后才启用 timer。
+
+测试覆盖配置迁移、交互和命令行保存、实际请求额度与限速参数、随机计划、日期切换、区域校验、源顺序随机、不修改内置表、失败换源、有间隔的有限重试、Retry-After、403/418 冷却、重启延续冷却、并发锁、崩溃预留和匿名文件清理。开发端仅做小流量联网实测，未用公共源持续下载 20 GB。
+
+Python 安装依据：[RHEL](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/configuring_basic_system_settings/assembly_introduction-to-python_configuring-basic-system-settings)、[Amazon Linux 2023](https://docs.aws.amazon.com/linux/al2023/ug/python.html)。
 
 源目录参考：[南京大学](https://mirrors.nju.edu.cn/ubuntu-releases/24.04/)、[中科大说明](https://mirrors.ustc.edu.cn/help/ubuntu-releases.html)、[阿里云公网 ISO 暂停公告](https://mirrors.aliyun.com/ubuntu-releases/24.04/)。
