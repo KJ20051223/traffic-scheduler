@@ -14,7 +14,7 @@ platform_detect() {
             [[ $major =~ ^[0-9]+$ && $major -ge 20 ]] || { echo '需要 Ubuntu 20.04+' >&2; return 1; }
             PLATFORM_FAMILY=apt ;;
         debian)
-            [[ $major =~ ^[0-9]+$ && $major -ge 11 ]] || { echo '需要 Debian 11+' >&2; return 1; }
+            [[ $major =~ ^[0-9]+$ && $major -ge 12 ]] || { echo '需要 Debian 12+，旧版本请先处理系统和软件源升级。' >&2; return 1; }
             PLATFORM_FAMILY=apt ;;
         rhel|rocky|almalinux|ol)
             [[ $major =~ ^[0-9]+$ && $major -ge 8 ]] || { echo '需要 RHEL/Rocky/AlmaLinux/Oracle Linux 8+' >&2; return 1; }
@@ -96,7 +96,7 @@ install_dependencies() {
         rpm) "$PACKAGE_MANAGER" install -y ca-certificates tzdata util-linux shadow-utils ;;
         zypper)
             zypper --non-interactive refresh
-            zypper --non-interactive install --no-recommends ca-certificates tzdata util-linux shadow
+            zypper --non-interactive install --no-recommends ca-certificates timezone util-linux shadow
             ;;
         pacman)
             # No -Sy partial upgrade, and no unsolicited full-system upgrade.

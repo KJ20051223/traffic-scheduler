@@ -9,7 +9,7 @@ Linux **仅下行**流量调度：每天按北京时间随机分散下载，默�
 | 系统 | 版本范围 | 包管理器 |
 | --- | --- | --- |
 | Ubuntu | 20.04+ | apt |
-| Debian | 11+ | apt |
+| Debian | 12+ | apt |
 | RHEL、Rocky、AlmaLinux、Oracle Linux | 8+，软件源需提供 Python 3.8+ | dnf / yum |
 | CentOS Stream | 9+ | dnf |
 | Fedora | 40+ | dnf |
@@ -17,7 +17,7 @@ Linux **仅下行**流量调度：每天按北京时间随机分散下载，默�
 | openSUSE | Leap 15.6+、Tumbleweed / Slowroll | zypper |
 | Arch Linux | 滚动发行版，系统已正常更新 | pacman |
 
-Linux Mint、Manjaro 等衍生系统会根据 `/etc/os-release` 的 `ID_LIKE` 选择相应安装方式，仍会检查实际工具和解释器。Alpine 默认 OpenRC、CentOS 7/8、Amazon Linux 2、未运行 systemd 的普通容器、Windows/macOS 不在当前支持范围。
+Linux Mint、Manjaro 等衍生系统会根据 `/etc/os-release` 的 `ID_LIKE` 选择相应安装方式，仍会检查实际工具和解释器。Alpine 默认 OpenRC、Debian 11 及以前、CentOS 7/8、Amazon Linux 2、未运行 systemd 的普通容器、Windows/macOS 不在当前支持范围。
 
 系统自带的软件源必须可用，安装器不会修改软件源、关闭 SELinux、升级整个系统或替换 `/usr/bin/python3`。RHEL 8 等默认 Python 较旧的系统会尝试安装独立的 Python 3.12 / 3.11 / 3.9；CLI、安装实测和 systemd 使用同一选定解释器。Arch 不执行 `pacman -Sy` 部分升级，软件源失效时提示用户先完成系统更新。
 

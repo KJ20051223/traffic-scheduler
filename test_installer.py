@@ -26,7 +26,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_supported_distributions_and_derivatives_choose_package_family(self):
         fixtures = [('ubuntu', '20.04', '', 'apt'), ('ubuntu', '24.04', '', 'apt'),
-                    ('debian', '11', '', 'apt'), ('debian', '13', '', 'apt'),
+                    ('debian', '12', '', 'apt'), ('debian', '13', '', 'apt'),
                     ('rhel', '8.10', '', 'rpm'), ('rocky', '9.6', '', 'rpm'),
                     ('almalinux', '10', '', 'rpm'), ('ol', '9.6', '', 'rpm'),
                     ('centos', '9', 'rhel fedora', 'rpm'), ('fedora', '44', '', 'rpm'),
@@ -44,7 +44,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(result.stdout, family)
 
     def test_old_or_unknown_distributions_fail_before_package_operations(self):
-        for identifier, version in [('ubuntu', '18.04'), ('debian', '10'), ('centos', '7'),
+        for identifier, version in [('ubuntu', '18.04'), ('debian', '11'), ('centos', '7'),
                                     ('centos', '8'), ('rhel', '7.9'), ('amzn', '2'),
                                     ('opensuse-leap', '15.5'), ('alpine', '3.22'), ('unknown', '1')]:
             with self.subTest(identifier=identifier, version=version):
