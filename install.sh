@@ -635,7 +635,14 @@ def real_test(config, directory, megabytes=10):
         start = time.monotonic()
         try:
             with deadline(max(180, remaining_seconds(test_config, data) * 4 + 60)):
-                run_session(test_config, data, test_dir / 'test.json', test_dir, network)
+                # Complete the required download before an unavailable upload can stop setup.
+                for direction in ('download', 'upload'):
+                    if not test_config['directions'][direction]['enabled']:
+                        continue
+                    single = json.loads(json.dumps(test_config))
+                    for other in DIRECTIONS:
+                        single['directions'][other]['enabled'] = other == direction
+                    run_session(single, data, test_dir / 'test.json', test_dir, network)
         finally:
             atomic_json(directory / 'geo.json', network.cache)
         for d in DIRECTIONS:

@@ -345,7 +345,20 @@ class Tests(unittest.TestCase):
         result = json.loads((self.directory / 'last-test.json').read_text())
         self.assertEqual(result['download']['confirmed'], 17)
         self.assertEqual(result['upload']['confirmed'], 17)
+        self.assertEqual(network.calls[0][0], 'http://example.com/file')
         self.assertFalse(list(self.directory.glob('test-*')))
+
+    def test_download_runs_even_when_upload_endpoint_rejects(self):
+        network = self.net
+        network.cache = {}
+        self.config['directions']['upload']['targets'] = [self.target('/blocked', 'post')]
+        with patch.object(t, 'Network', return_value=network), patch.object(t, 'Pacer', NoPacer), \
+                patch.dict(t.BUILTINS, {'download': {'cn': [self.target('/file')]}}):
+            with self.assertRaises(OSError):
+                t.real_test(self.config, self.directory, 0.000017)
+        self.assertEqual(network.calls[0][0], 'http://example.com/file')
+        self.assertEqual(network.calls[1][0], 'http://example.com/blocked')
+        self.assertFalse((self.directory / 'last-test.json').exists())
 
 
 if __name__ == '__main__':
