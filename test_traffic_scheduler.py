@@ -68,6 +68,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
             body, kind = b'{"received_bytes": 1}', 'application/json'
         elif self.path == '/receiver':
             body, kind = json.dumps({'received_bytes': len(received)}).encode(), 'application/json'
+        elif self.path == '/speedtest-cn':
+            body, kind = ('upload size:' + str(len(received))).encode(), 'text/plain'
+        elif self.path == '/bad-speedtest-cn':
+            body, kind = b'upload size:1', 'text/plain'
         else:
             body, kind = ('size={}\n'.format(len(received))).encode(), 'text/plain'
         self.send_response(200)
@@ -146,6 +150,15 @@ class Tests(unittest.TestCase):
         with self.assertRaises(OSError):
             self.transfer('upload', '/wrong', 17, 'receiver')
         self.assertEqual(self.data['upload']['bytes'], 34)
+        self.assertEqual(self.data['upload']['confirmed'], 17)
+
+    def test_mainland_speedtest_requires_exact_receipt(self):
+        self.transfer('upload', '/speedtest-cn', 17, 'speedtest_cn')
+        self.assertEqual(self.data['upload']['confirmed'], 17)
+        for path in ('/bad-speedtest-cn', '/upload'):
+            with self.assertRaises(OSError):
+                self.transfer('upload', path, 17, 'speedtest_cn')
+        self.assertEqual(self.data['upload']['bytes'], 51)
         self.assertEqual(self.data['upload']['confirmed'], 17)
 
     def test_block_page_is_not_successful_upload(self):
@@ -333,32 +346,64 @@ class Tests(unittest.TestCase):
             self.assertEqual(t.tick(self.config, self.directory), 0)
         self.assertEqual(t.read_day(ledger, '2026-11-01')['upload']['bytes'], 123)
 
-    def test_first_test_always_downloads_even_upload_only(self):
+    def test_upload_only_test_never_downloads(self):
         network = self.net
         network.cache = {}
         self.config['directions']['upload']['targets'] = [self.target('/upload', 'post')]
-        # The mandatory download gets built-ins for the selected upload region.
-        replacement = {'cn': [self.target('/file')]}
-        with patch.object(t, 'Network', return_value=network), patch.object(t, 'Pacer', NoPacer), \
-                patch.dict(t.BUILTINS, {'download': replacement}):
+        with patch.object(t, 'Network', return_value=network), patch.object(t, 'Pacer', NoPacer):
             t.real_test(self.config, self.directory, 0.000017)
         result = json.loads((self.directory / 'last-test.json').read_text())
-        self.assertEqual(result['download']['confirmed'], 17)
+        self.assertEqual(result['download']['confirmed'], 0)
         self.assertEqual(result['upload']['confirmed'], 17)
-        self.assertEqual(network.calls[0][0], 'http://example.com/file')
+        self.assertEqual(network.calls, [('http://example.com/upload', 'cn')])
         self.assertFalse(list(self.directory.glob('test-*')))
 
-    def test_download_runs_even_when_upload_endpoint_rejects(self):
+    def test_selected_download_runs_before_rejected_upload_in_both_mode(self):
         network = self.net
         network.cache = {}
         self.config['directions']['upload']['targets'] = [self.target('/blocked', 'post')]
-        with patch.object(t, 'Network', return_value=network), patch.object(t, 'Pacer', NoPacer), \
-                patch.dict(t.BUILTINS, {'download': {'cn': [self.target('/file')]}}):
+        self.config['directions']['download'].update(enabled=True, targets=[self.target('/file')])
+        with patch.object(t, 'Network', return_value=network), patch.object(t, 'Pacer', NoPacer):
             with self.assertRaises(OSError):
                 t.real_test(self.config, self.directory, 0.000017)
         self.assertEqual(network.calls[0][0], 'http://example.com/file')
         self.assertEqual(network.calls[1][0], 'http://example.com/blocked')
         self.assertFalse((self.directory / 'last-test.json').exists())
+
+    def test_download_only_test_never_uploads(self):
+        network = self.net
+        network.cache = {}
+        self.config['directions']['upload']['enabled'] = False
+        self.config['directions']['download'].update(enabled=True, targets=[self.target('/file')])
+        with patch.object(t, 'Network', return_value=network), patch.object(t, 'Pacer', NoPacer):
+            t.real_test(self.config, self.directory, 0.000017)
+        result = json.loads((self.directory / 'last-test.json').read_text())
+        self.assertEqual(result['upload']['confirmed'], 0)
+        self.assertEqual(result['download']['confirmed'], 17)
+        self.assertEqual(network.calls, [('http://example.com/file', 'cn')])
+
+    def test_both_mode_test_requires_each_selected_direction(self):
+        network = self.net
+        network.cache = {}
+        self.config['directions']['upload']['targets'] = [self.target('/upload', 'post')]
+        self.config['directions']['download'].update(enabled=True, targets=[self.target('/file')])
+        with patch.object(t, 'Network', return_value=network), patch.object(t, 'Pacer', NoPacer):
+            t.real_test(self.config, self.directory, 0.000017)
+        result = json.loads((self.directory / 'last-test.json').read_text())
+        self.assertEqual(result['upload']['confirmed'], 17)
+        self.assertEqual(result['download']['confirmed'], 17)
+
+    def test_first_test_failover_still_confirms_full_test_amount(self):
+        network = self.net
+        network.cache = {}
+        self.config['directions']['upload']['targets'] = [self.target('/wrong', 'receiver'),
+                                                        self.target('/receiver', 'receiver')]
+        with patch.object(t, 'Network', return_value=network), patch.object(t, 'Pacer', NoPacer):
+            t.real_test(self.config, self.directory, 0.000017)
+        result = json.loads((self.directory / 'last-test.json').read_text())
+        self.assertEqual(result['upload']['confirmed'], 17)
+        self.assertEqual(result['upload']['bytes'], 34)
+        self.assertEqual(result['download']['bytes'], 0)
 
 
 if __name__ == '__main__':

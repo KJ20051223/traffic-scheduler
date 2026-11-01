@@ -20,7 +20,7 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '2.0.0'
+VERSION = '2.0.1'
 CONFIG = Path('/etc/traffic-scheduler/config.json')
 STATE = Path('/var/lib/traffic-scheduler')
 BJ = dt.timezone(dt.timedelta(hours=8))
@@ -45,7 +45,8 @@ BUILTINS = {
     },
     'upload': {
         'cn': [
-            {'name': '昆山杜克测速节点', 'kind': 'post', 'url': 'https://speedtest.dukekunshan.edu.cn:8080/upload'},
+            {'name': '南京移动测速 194', 'kind': 'speedtest_cn', 'url': 'https://node-183-213-92-194.speedtest.cn:51090/upload'},
+            {'name': '南京移动测速 198', 'kind': 'speedtest_cn', 'url': 'https://node-183-213-92-198.speedtest.cn:51090/upload'},
         ],
         'overseas': [
             {'name': 'Cloudflare', 'kind': 'post', 'url': 'https://speed.cloudflare.com/__up'},
@@ -124,8 +125,10 @@ def validate(config):
             raise ValueError('targets 必须为列表')
         for target in targets(config, direction):
             parse_url(target['url'])
-            if target.get('kind') not in ('range', 'generated', 'post', 'stream', 'receiver'):
+            if target.get('kind') not in ('range', 'generated', 'post', 'stream', 'receiver', 'speedtest_cn'):
                 raise ValueError('目标 kind 无效')
+            if target.get('kind') == 'speedtest_cn' and direction != 'upload':
+                raise ValueError('speedtest_cn 仅用于上行')
         if item['enabled']:
             active_seconds += item['daily_bytes'] / (rate * 125000)
             if not targets(config, direction):
@@ -385,6 +388,10 @@ def transfer(network, direction, item, target, amount, directory, data, path, pa
                 if target['kind'] == 'receiver':
                     if json.loads(body).get('received_bytes') != actual:
                         raise OSError('接收端确认字节数不符')
+                elif target['kind'] == 'speedtest_cn':
+                    receipt = re.fullmatch(rb'\s*upload size:(\d+)\s*', body)
+                    if not receipt or int(receipt.group(1)) != actual:
+                        raise OSError('大陆测速接收端未确认完整字节数')
                 elif re.fullmatch(rb'\s*size=\d+\s*', body):
                     if int(body.strip().split(b'=')[1]) != actual:
                         raise OSError('测速接收端确认字节数不符')
@@ -475,18 +482,18 @@ def deadline(seconds):
             signal.signal(signum, handler)
 
 
-def pick_direction(config, data):
+def pick_direction(config, data, metric='bytes'):
     choices = [d for d in DIRECTIONS if config['directions'][d]['enabled']
-               and data[d]['bytes'] < config['directions'][d]['daily_bytes']]
-    return min(choices, key=lambda d: data[d]['bytes'] / config['directions'][d]['daily_bytes']) if choices else None
+               and data[d][metric] < config['directions'][d]['daily_bytes']]
+    return min(choices, key=lambda d: data[d][metric] / config['directions'][d]['daily_bytes']) if choices else None
 
 
-def run_session(config, data, path, directory, network):
+def run_session(config, data, path, directory, network, metric='bytes'):
     selected = {}
     failed = {d: set() for d in DIRECTIONS}
     pacers = {d: Pacer(config['directions'][d]['mbps']) for d in DIRECTIONS}
     while True:
-        direction = pick_direction(config, data)
+        direction = pick_direction(config, data, metric)
         if direction is None:
             return True
         item = config['directions'][direction]
@@ -498,7 +505,7 @@ def run_session(config, data, path, directory, network):
             target = available[0]
         # At a low configured speed, finish a request inside a short time slice.
         amount = min(PIECE, max(1, int(item['mbps'] * 125000 * 8)),
-                     item['daily_bytes'] - data[direction]['bytes'])
+                     item['daily_bytes'] - data[direction][metric])
         before = data[direction]['confirmed']
         try:
             transfer(network, direction, item, target, amount, directory, data, path, pacers[direction])
@@ -568,11 +575,6 @@ def real_test(config, directory, megabytes=10):
     directory.mkdir(parents=True, exist_ok=True)
     size = int(megabytes * 1_000_000)
     test_config = json.loads(json.dumps(config))
-    download = test_config['directions']['download']
-    if not download['enabled']:
-        download['region'] = test_config['directions']['upload']['region']
-        download['targets'] = []
-    download['enabled'] = True  # A real download is mandatory even for upload-only setup.
     for d in DIRECTIONS:
         test_config['directions'][d]['daily_bytes'] = size
     network = Network(load_geo(directory))
@@ -582,21 +584,22 @@ def real_test(config, directory, megabytes=10):
         start = time.monotonic()
         try:
             with deadline(max(180, remaining_seconds(test_config, data) * 4 + 60)):
-                # Complete the required download before an unavailable upload can stop setup.
+                # Test only selected directions; when both are selected, download first.
                 for direction in ('download', 'upload'):
                     if not test_config['directions'][direction]['enabled']:
                         continue
                     single = json.loads(json.dumps(test_config))
                     for other in DIRECTIONS:
                         single['directions'][other]['enabled'] = other == direction
-                    run_session(single, data, test_dir / 'test.json', test_dir, network)
+                    run_session(single, data, test_dir / 'test.json', test_dir, network, metric='confirmed')
         finally:
             atomic_json(directory / 'geo.json', network.cache)
         for d in DIRECTIONS:
             if test_config['directions'][d]['enabled'] and data[d]['confirmed'] < size:
                 raise OSError('{}实测未完成：确认 {} / {} 字节'.format(LABEL[d], data[d]['confirmed'], size))
-        log('实测通过：下行={} MB，上行={} MB，耗时 {:.1f} 秒；测试流量单独计量'.format(
-            data['download']['confirmed'] / 1e6, data['upload']['confirmed'] / 1e6, time.monotonic() - start))
+        results = '，'.join('{}={} MB'.format(LABEL[d], data[d]['confirmed'] / 1e6)
+                          for d in DIRECTIONS if test_config['directions'][d]['enabled'])
+        log('实测通过：{}，耗时 {:.1f} 秒；测试流量单独计量'.format(results, time.monotonic() - start))
         atomic_json(directory / 'last-test.json', {'at': now().isoformat(), 'version': VERSION,
                     'upload': data['upload'], 'download': data['download'],
                     'config_hash': hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()})
@@ -611,7 +614,9 @@ def wizard(path):
     config = load_config(path) if path.exists() else default_config()
     print('\n流量调度设置（北京时间，全天随机分散；GB=10^9 字节，Mbps=兆比特/秒）')
     print('上行=服务器向目标上传；下行=服务器从目标下载。双向按各自额度交替执行。')
-    choice = prompt('模式：1 上行 / 2 下行 / 3 双向', '1')
+    enabled = [d for d in DIRECTIONS if config['directions'][d]['enabled']]
+    choice = prompt('模式：1 上行 / 2 下行 / 3 双向',
+                    '3' if len(enabled) == 2 else ('1' if 'upload' in enabled else '2'))
     if choice not in ('1', '2', '3'):
         raise ValueError('模式只能选 1、2、3')
     for direction in DIRECTIONS:
@@ -629,6 +634,8 @@ def wizard(path):
         if region not in ('1', '2'):
             raise ValueError('目标只能选 1 或 2')
         item['region'] = 'cn' if region == '1' else 'overseas'
+        if direction == 'upload' and item['region'] == 'cn':
+            print('内置大陆上行使用测速接收端，测试时会核对对端确认的字节数。')
         item['targets'] = []
         custom = prompt('自定义 HTTP(S) 地址（直接回车使用内置）', '').strip()
         if custom:
@@ -676,7 +683,7 @@ def main():
     commands.add_parser('configure', help='交互设置；修改后需要 test 再启动定时任务')
     commands.add_parser('tick', help='执行当前随机时间片')
     commands.add_parser('status', help='显示今日上下行进度')
-    test = commands.add_parser('test', help='任何时间真实传输，默认每方向 10MB，且一定测下行')
+    test = commands.add_parser('test', help='任何时间真实传输，只测试启用的方向，默认每方向 10MB')
     test.add_argument('--mb', type=float, default=10)
     args = parser.parse_args()
     if args.command == 'configure':

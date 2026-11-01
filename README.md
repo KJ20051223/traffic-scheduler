@@ -19,8 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/KJ20051223/traffic-scheduler/main/i
 1. 上行 / 下行 / 双向。
 2. 每个启用方向的每日 GB 数和 Mbps 限速。
 3. 每个方向使用大陆还是海外目标，或者输入自己的目标 URL。
-4. 自动进行真实传输测试：**一定下载 10 MB**；启用了上行时再实际上传 10 MB。
-5. 只有真实传输测试全部成功，才启用定时任务；失败时不显示安装成功、不启用任务。
+4. 自动进行真实传输测试：**只测所选方向**。仅上行只上传 10 MB，仅下行只下载 10 MB，双向各测 10 MB。
+5. 只有真实传输测试全部成功，才启用定时任务；交互安装失败时可直接重新设置、按原设置重试或退出。非交互 `--defaults` 失败时退出，不启用任务。
 
 全部使用默认值、无需交互：
 
@@ -45,11 +45,32 @@ sudo bash install.sh
 | 方向 | 大陆 | 海外（包括港澳台） |
 | --- | --- | --- |
 | 下行 | 华为云 mirrors / repo 镜像源，下载 Ubuntu Server ISO 的分块内容 | Cloudflare Speed Test 数据生成端点 |
-| 上行 | 昆山杜克大学公开测速上传节点 | Cloudflare Speed Test 上传端点 |
+| 上行 | 南京移动两台测速接收节点（194 / 198），核对接收字节确认 | Cloudflare Speed Test 上传端点 |
 
-大陆上传节点：`https://speedtest.dukekunshan.edu.cn:8080/upload`。2026-11-01 已在开发端和使用者 Ubuntu 服务器上分别得到 `size=1024` 的实际上传确认。开发端还验证了公网 IP `180.208.59.230` 归属 CN；运行时仍重新解析，不硬编码 IP。
+大陆上传内置主备地址：
 
-**验证范围：** 开发端已通过大陆镜像 10 MB 下载、海外 10 MB 上传和 10 MB 下载。大陆上传仅确认了小请求；开发端 128 KiB 成功，1 MB 请求超时，尚未证明此节点可持续完成每日 20 GB。使用者服务器需要通过安装器的完整 10 MB 上传测试；失败会停止安装，不能把 1 KB 成功当作大流量稳定性保证。可以改选海外或使用自己的大陆接收端。
+```text
+https://node-183-213-92-194.speedtest.cn:51090/upload
+https://node-183-213-92-198.speedtest.cn:51090/upload
+```
+
+**验证范围：** 2026-11-01，开发端使用本程序以 5 Mbps 向以上两个节点分别上传 10,000,000 字节，每块均收到 `upload size:N` 且 N 与发送量一致，分别耗时约 17.2 秒、20.4 秒。实际连接 IP `183.213.92.194`、`183.213.92.198` 的归属查询均为 CN。首次安装仍在使用者服务器重新实测，开发端成功不代表所有来源均可访问，也未验证持续 20 GB。
+
+先前仅通过小包的杜克节点已经从默认列表移除：开发端 1 MB 超时，使用者 Ubuntu 的 2 MiB 请求也出现 TLS EOF。大陆镜像 10 MB 下载及海外 10 MB 上传、下载仍已通过开发端验证。
+
+### 已安装程序在测试阶段失败
+
+旧版可能先下载 10 MB，接着向杜克节点上传时发生 `EOF occurred in violation of protocol`。2.0.1 已更换大陆节点，并按启用方向测试。升级请重新下载并运行本仓库安装器，保留已有额度、速度及每日进度。无需卸载，也不要跳过测试直接启用 timer。
+
+可以用已安装的程序重新设置并完成激活，无需再次安装依赖：
+
+```bash
+sudo systemctl disable --now traffic-scheduler.timer
+sudo systemctl stop traffic-scheduler.service
+sudo traffic-scheduler configure && sudo -u traffic-scheduler traffic-scheduler test --mb 10 && sudo systemctl enable --now traffic-scheduler.timer
+```
+
+新版设置中选模式 `1`，保留原来的 GB 与 Mbps，目标选 `1`，自定义地址直接回车即可使用新的大陆节点。如需海外，目标选 `2`。`&&` 保证测试失败时不启用定时器。`snapd.service` 的 `Unknown key name 'RestartMode'` 是另一个服务的校验警告，不是本次上传 EOF 的证据，不需要为此修改 snapd。
 
 先前失败的华科镜像、拒绝公网的中科大测速端，以及已在使用者服务器上失败的运营商候选，不在默认列表中。程序使用 HTTP/1.1、明确的 User-Agent、禁用响应压缩、关闭连接，避免依赖旧 curl 请求行为；遇到空响应、403、5xx、错误网页或不遵守 Range 的镜像会视为失败并换源，不能保证任何公共端点永不限制访问。
 
@@ -72,14 +93,14 @@ sudo bash install.sh
 
 **计量定义：** 1 GB = 1,000,000,000 字节，1 MB = 1,000,000 字节；10 Mbps = 1,250,000 字节/秒。软件限速约束有效负载读取/发送节奏，不是网卡瞬时峰值保证。TCP/TLS/HTTP 开销、ACK、重传和 IP/DNS 查询不含在配额里，运营商账单会不同。
 
-首次和手动实测**额外计量**，默认仅下行模式消耗 10 MB，下行+上行测试消耗约 20 MB 的有效负载，且不改变当天正式额度。
+首次和手动实测**额外计量**。仅上行上传 10 MB、仅下行下载 10 MB、双向各 10 MB，不改变当天正式额度。测试要求足额确认；换源前的失败尝试可能额外消耗流量。
 
 每次最多请求 2 MiB，下载写入匿名临时文件并立即清理；上行在内存生成合成数据，不会读取、上传服务器现有文件。断电或 `kill -9` 时，未结算块按最多 2 MiB 保守计入，避免重启后超额。失败请求中已经发送/收到的有效负载也计入额度；`status` 分别展示计量量和已确认完成量。
 
 ## 日常命令
 
 ```bash
-# 随时真正下载/上传测试，默认每方向 10MB；不受随机时间限制
+# 随时实测：只测启用的方向，每个方向默认 10MB；不受随机时间限制
 sudo -u traffic-scheduler traffic-scheduler test --mb 10
 
 # 更大的一次测试（每个测试方向 100MB，使用原配置的限速与区域）
@@ -121,7 +142,7 @@ sudo bash install-traffic-scheduler.sh
 ]
 ```
 
-`post` 接受 HTTP 200/201/204 的非 HTML 接收端；Ookla 风格的 `size=N` 会核对字节数。`receiver` 要求 JSON `received_bytes` 与实际发送一致。`range` 为 ISO 等支持 206 的文件；`stream` 为自定义有界读取的二进制响应；`generated` 为 Cloudflare 风格 `?bytes=N` 端点。
+`post` 接受 HTTP 200/201/204 的非 HTML 接收端；Ookla 风格的 `size=N` 会核对字节数。`speedtest_cn` 专用于上述测速网节点，必须得到与发送量一致的 `upload size:N`。`receiver` 要求 JSON `received_bytes` 与实际发送一致。`range` 为 ISO 等支持 206 的文件；`stream` 为自定义有界读取的二进制响应；`generated` 为 Cloudflare 风格 `?bytes=N` 端点。
 
 仓库附 `receiver.py`，在另一台你拥有的大陆或海外服务器运行：
 
