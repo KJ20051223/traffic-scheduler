@@ -1,178 +1,131 @@
-# Traffic Scheduler
+# Traffic Scheduler 2.1.0
 
-Ubuntu 上全天随机分散执行的上下行流量任务。默认 **每天上行 20 GB、10 Mbps、大陆目标**，按北京时间计量。支持只上行、只下行、双向；上下行额度、限速、目标区域分别设置。
+Ubuntu **仅下行**流量调度：每天按北京时间随机分散下载，默认 **20 GB/天、5 Mbps、中国大陆**。额度、速度、地区和自定义下载地址均可设置。已移除上传任务、上传节点和方向选择。
 
-> 上行 = 本服务器向接收端上传数据。下行 = 本服务器从目标下载文件。下载镜像文件不会变成服务器上行。
+## 安装或升级
 
-## 一条命令安装
+适用于启用 systemd 的 Ubuntu 20.04+、Python 3.8+。已有安装直接覆盖升级，无需卸载。
 
-适用于正常启用 systemd 的 Ubuntu 20.04+，支持 x86_64、ARM64 等运行 Python 3 的架构。用 root 或有 sudo 权限的账户执行：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KJ20051223/traffic-scheduler/main/install.sh -o install-traffic-scheduler.sh && sudo bash install-traffic-scheduler.sh
-```
-
-如果 Ubuntu 没装 curl，先执行 `sudo apt-get update && sudo apt-get install -y curl`。
-
-安装器会交互询问：
-
-1. 上行 / 下行 / 双向。
-2. 每个启用方向的每日 GB 数和 Mbps 限速。
-3. 每个方向使用大陆还是海外目标，或者输入自己的目标 URL。
-4. 自动进行真实传输测试：**只测所选方向**。仅上行只上传 10 MB，仅下行只下载 10 MB，双向各测 10 MB。
-5. 只有真实传输测试全部成功，才启用定时任务；交互安装失败时可直接重新设置、按原设置重试或退出。非交互 `--defaults` 失败时退出，不启用任务。
-
-全部使用默认值、无需交互：
+下面明确设置 **每日下行 20 GB、最高 5 Mbps、大陆内置源**；把 `20` 和 `5` 改成需要的数字：
 
 ```bash
-sudo bash install-traffic-scheduler.sh --defaults
+curl -fsSL https://raw.githubusercontent.com/KJ20051223/traffic-scheduler/main/install.sh -o install-traffic-scheduler.sh && sudo bash install-traffic-scheduler.sh --gb 20 --mbps 5 --region cn --builtin
 ```
 
-`--defaults` 在已有配置时保留已有设置，同样重新实测，不会清零当天额度。
-
-## 手动上传脚本到服务器
-
-从仓库下载 **[install.sh](https://raw.githubusercontent.com/KJ20051223/traffic-scheduler/main/install.sh)**，上传到服务器任意目录，在该目录执行：
-
-```bash
-sudo bash install.sh
-```
-
-这个 SH 内嵌完整 Python 程序，**不需要再上传压缩包、源码或配置文件**。安装仍需 Ubuntu 软件源提供 Python 3、证书和时区数据，不是离线系统依赖安装器。
-
-## 内置目标
-
-| 方向 | 大陆 | 海外（包括港澳台） |
-| --- | --- | --- |
-| 下行 | 华为云 mirrors / repo 镜像源，下载 Ubuntu Server ISO 的分块内容 | Cloudflare Speed Test 数据生成端点 |
-| 上行 | 南京移动两台测速接收节点（194 / 198），核对接收字节确认 | Cloudflare Speed Test 上传端点 |
-
-大陆上传内置主备地址：
-
-```text
-https://node-183-213-92-194.speedtest.cn:51090/upload
-https://node-183-213-92-198.speedtest.cn:51090/upload
-```
-
-**验证范围：** 2026-11-01，开发端使用本程序以 5 Mbps 向以上两个节点分别上传 10,000,000 字节，每块均收到 `upload size:N` 且 N 与发送量一致，分别耗时约 17.2 秒、20.4 秒。实际连接 IP `183.213.92.194`、`183.213.92.198` 的归属查询均为 CN。首次安装仍在使用者服务器重新实测，开发端成功不代表所有来源均可访问，也未验证持续 20 GB。
-
-先前仅通过小包的杜克节点已经从默认列表移除：开发端 1 MB 超时，使用者 Ubuntu 的 2 MiB 请求也出现 TLS EOF。大陆镜像 10 MB 下载及海外 10 MB 上传、下载仍已通过开发端验证。
-
-### 已安装程序在测试阶段失败
-
-旧版可能先下载 10 MB，接着向杜克节点上传时发生 `EOF occurred in violation of protocol`。2.0.1 已更换大陆节点，并按启用方向测试。升级请重新下载并运行本仓库安装器，保留已有额度、速度及每日进度。无需卸载，也不要跳过测试直接启用 timer。
-
-可以用已安装的程序重新设置并完成激活，无需再次安装依赖：
-
-```bash
-sudo systemctl disable --now traffic-scheduler.timer
-sudo systemctl stop traffic-scheduler.service
-sudo traffic-scheduler configure && sudo -u traffic-scheduler traffic-scheduler test --mb 10 && sudo systemctl enable --now traffic-scheduler.timer
-```
-
-新版设置中选模式 `1`，保留原来的 GB 与 Mbps，目标选 `1`，自定义地址直接回车即可使用新的大陆节点。如需海外，目标选 `2`。`&&` 保证测试失败时不启用定时器。`snapd.service` 的 `Unknown key name 'RestartMode'` 是另一个服务的校验警告，不是本次上传 EOF 的证据，不需要为此修改 snapd。
-
-先前失败的华科镜像、拒绝公网的中科大测速端，以及已在使用者服务器上失败的运营商候选，不在默认列表中。程序使用 HTTP/1.1、明确的 User-Agent、禁用响应压缩、关闭连接，避免依赖旧 curl 请求行为；遇到空响应、403、5xx、错误网页或不遵守 Range 的镜像会视为失败并换源，不能保证任何公共端点永不限制访问。
-
-连接前会要求目标 IPv4 为公网地址，通过 HTTPS 查询归属，再固定连接到该 IP，保留 HTTPS 的域名证书校验。选择大陆只允许 CN；选择海外只允许非 CN。遇到下载重定向会重新校验，不会跨区域降级冒充成功。归属库缓存 24 小时；IP 地理库可能存在误差，区域标签不保证物理机房或互联网路由位置。
-
-对于本机代理返回的 `198.18.0.0/15` 等假 IP，程序会尝试 HTTPS DNS 查询公网地址，不改系统 DNS，不读取代理凭证。文件数据连接不使用 HTTP(S) 代理环境变量。
-
-公共测速服务可能限制来源、请求大小或长期流量。脚本不绕过限制；如节点后来拒绝访问，日志会明确报错。可配置自己有权使用的接收端以提高长期稳定性。
-
-## 随机时间与每日额度
-
-- 每天北京时间 00:00 起按新日期计量，系统时区不变。
-- 从全天的分钟中随机选取多个时间片，保存计划，分散执行；不再限制 03:00–05:00。
-- 每个时间片最多工作至当分钟约第 52 秒，下载/上传按各自设置的速度交替执行，不同时叠加两份速度。
-- 同一进程、定时任务和手动测试共用锁，避免并发叠加流量。
-- 根据剩余字节数、实测速度和连接耗时留出执行余量；变慢时增加随机时段，时间紧张时使用剩余分钟补足。
-- 到午夜停止当前日任务，次日重新产生计划；每天最多使用各方向配置的计量额度。
-- 20 GB、10 Mbps 的理论有效传输时间至少是 **4 小时 26 分 40 秒**。安装当日如果剩余时间不足，网络过慢、断网或所有目标拒绝访问，不能保证当天刷足。状态和日志显示真实进度，不补记为成功。
-- 为随机间隔、重试和元数据操作留余量，设置的理论传输总时间超过 16.8 小时/天时会拒绝配置。
-
-**计量定义：** 1 GB = 1,000,000,000 字节，1 MB = 1,000,000 字节；10 Mbps = 1,250,000 字节/秒。软件限速约束有效负载读取/发送节奏，不是网卡瞬时峰值保证。TCP/TLS/HTTP 开销、ACK、重传和 IP/DNS 查询不含在配额里，运营商账单会不同。
-
-首次和手动实测**额外计量**。仅上行上传 10 MB、仅下行下载 10 MB、双向各 10 MB，不改变当天正式额度。测试要求足额确认；换源前的失败尝试可能额外消耗流量。
-
-每次最多请求 2 MiB，下载写入匿名临时文件并立即清理；上行在内存生成合成数据，不会读取、上传服务器现有文件。断电或 `kill -9` 时，未结算块按最多 2 MiB 保守计入，避免重启后超额。失败请求中已经发送/收到的有效负载也计入额度；`status` 分别展示计量量和已确认完成量。
-
-## 日常命令
-
-```bash
-# 随时实测：只测启用的方向，每个方向默认 10MB；不受随机时间限制
-sudo -u traffic-scheduler traffic-scheduler test --mb 10
-
-# 更大的一次测试（每个测试方向 100MB，使用原配置的限速与区域）
-sudo -u traffic-scheduler traffic-scheduler test --mb 100
-
-# 今日进度、上下行独立额度、速度、区域和下一随机时段
-sudo traffic-scheduler status
-
-# 下一次分钟检查时间；它是检查时间，实际传输只在选中的随机时段进行
-systemctl list-timers traffic-scheduler.timer
-
-# 日志
-sudo journalctl -u traffic-scheduler.service -n 80 --no-pager
-sudo journalctl -u traffic-scheduler.service -f
-
-# 停用（同时停止本次传输）
-sudo systemctl disable --now traffic-scheduler.timer
-sudo systemctl stop traffic-scheduler.service
-
-# 恢复
-sudo systemctl enable --now traffic-scheduler.timer
-```
-
-修改配置，推荐重新执行安装脚本，保留当天进度并重新实测后启用：
+不带参数则交互设置，仅询问下行 GB、Mbps、地区和下载 URL：
 
 ```bash
 sudo bash install-traffic-scheduler.sh
 ```
 
-也可手动编辑 `/etc/traffic-scheduler/config.json`，但需要先停止 timer/service，改完再以服务用户执行 `test`；当前配置未实测通过时 `tick` 会拒绝运行。不要删除当天 `quota-YYYY-MM-DD.json` 来调整设置，否则会丢失计量记录。
+没有 curl 时先执行 `sudo apt-get update && sudo apt-get install -y curl`。安装仍需 Ubuntu 软件源安装 Python、证书和时区数据。
 
-## 自定义目标与可选自建接收端
+### 手动上传服务器
 
-在交互设置时输入 URL 会替代该方向的内置列表。也可以在配置中的 `targets` 添加多个目标：
-
-```json
-[
-  {"name": "自己的大陆接收端", "kind": "receiver", "url": "http://你的接收服务器公网IP:8765/upload"}
-]
-```
-
-`post` 接受 HTTP 200/201/204 的非 HTML 接收端；Ookla 风格的 `size=N` 会核对字节数。`speedtest_cn` 专用于上述测速网节点，必须得到与发送量一致的 `upload size:N`。`receiver` 要求 JSON `received_bytes` 与实际发送一致。`range` 为 ISO 等支持 206 的文件；`stream` 为自定义有界读取的二进制响应；`generated` 为 Cloudflare 风格 `?bytes=N` 端点。
-
-仓库附 `receiver.py`，在另一台你拥有的大陆或海外服务器运行：
+下载仓库里的 **[install.sh](https://raw.githubusercontent.com/KJ20051223/traffic-scheduler/main/install.sh)**，上传服务器，在该目录执行：
 
 ```bash
-sudo python3 receiver.py --allow-ip 发送方服务器公网IPv4 --port 8765
+sudo bash install.sh --gb 20 --mbps 5 --region cn --builtin
 ```
 
-仅允许显式指定的客户端 IPv4；接收数据直接丢弃，不写磁盘。你需要让自己的安全组允许该来源访问 8765/TCP。这个最简接收端的 HTTP 仅传输合成测试字节，不传账号、口令或现有文件；如配置 HTTPS 域名，可在前面使用自己的 TLS 反向代理。建议生产环境由 systemd 管理接收端。
+SH 内嵌完整程序，**只上传这一个文件即可**，不需要压缩包或单独上传 Python。
 
-## 卸载与旧版迁移
+### 配置生效与旧版迁移
+
+- 安装器停止旧任务，写入 `/etc/traffic-scheduler/config.json`，保存后回读显示实际 GB、Mbps、地区。
+- 安装实测和 systemd 服务明确读取同一配置路径；任务日志也打印实际额度和限速。
+- 用刚保存的限速和地区进行 **10 MB 真实下载**，成功后才启用 timer；失败保持停用。交互安装可重新设置或重试。
+- 保留当天已计量的下行进度。降低额度到已下载量以下时，当天停止继续下载。
+- `--defaults` 保留已有参数并迁移为仅下行；首次安装才使用默认 20 GB、5 Mbps。要覆盖旧参数，请明确传 `--gb` 和 `--mbps`。
+- 从 2.0.x 升级：已启用下行则保留下行参数；原来仅上行则把**当时启用的额度、速度、地区**迁移到下行，上传 URL 改为对应地区内置下载源。不会把闲置下行的 20 GB/10 Mbps 当成原设置。
+
+## 下载文件会自动删除吗？
+
+**会，不会留下完整 ISO 或不断积累文件。** 每次最多请求 **2 MiB**，写入 Linux 匿名临时文件。文件创建时就没有目录链接，正常完成、失败或中断时关闭；进程被强制结束时也由内核回收。
+
+首次 10 MB 实测分块执行，测试目录在结束或异常退出时清理。断电或强杀即便留下测试状态目录，也没有可见下载内容。配置、计量 JSON 和日志是运行记录，不是下载文件。
+
+Linux CI 检查正常完成、部分失败和中断后的清理，还检查**下载进行中临时文件链接数为 0**。
+
+## 内置目标
+
+| 区域 | 内置源 | 下载内容 |
+| --- | --- | --- |
+| 大陆 `cn` | 华为云 mirrors / repo | Ubuntu Server ISO 的部分字节，不安装、不执行 |
+| 海外 `overseas`（含港澳台） | Cloudflare Speed Test | 测速用二进制数据 |
+
+先前失败的华科下载地址和所有上传节点均已移除。空响应、错误网页、403、5xx 或不遵守 Range 会拒绝并换源。
+
+大陆只连接查询归属为 CN 的公网 IPv4；海外只允许非 CN。连接固定到已校验 IP，保留 HTTPS 证书校验，重定向重新校验地区，不跨区域回退。归属缓存 24 小时，地理库可能有误差，不能保证路由或机房位置。
+
+公网数据连接不使用代理环境变量。系统 DNS 返回假 IP 时尝试 HTTPS DNS，不改系统 DNS。公共源可能限制来源或长期流量，首次安装会在你的服务器实测，不能保证持续可用。
+
+自定义目标应是可访问的二进制文件 URL，可交互输入或：
 
 ```bash
-# 停止并移除程序、timer、service，保留配置和进度
+sudo bash install-traffic-scheduler.sh --gb 12 --mbps 3 --region cn --url 'https://你的域名/文件.bin'
+```
+
+更换地区清除旧地区自定义地址；显式指定 `--url` 使用新地址，`--builtin` 恢复内置源，两者不能同时使用。
+
+## 随机时间与计量
+
+- 按北京时间日期计量，不改系统时区。每天从全天分钟中随机选多个时间片，保存计划，间歇执行。
+- 每个时段最多到该分钟约第 52 秒，任务与手动测试共用锁，避免重叠。
+- 根据剩余额度、设置速度和实测速率分配时段；变慢时增加随机时段，时间不足时使用剩余分钟尽力补足。
+- 午夜结束当日任务，次日重新随机。安装当日剩余时间不足、网络慢或源不可用，不能保证刷足，进度不会虚报。
+- 20 GB 在 5 Mbps 下理论至少需 **8 小时 53 分 20 秒**有效传输。理论时间超过 16.8 小时/天会拒绝配置，给间隔和连接留余量。
+
+1 GB=10^9 字节，1 MB=10^6 字节，1 Mbps=125,000 字节/秒。限速控制有效负载读取节奏，受 TCP 缓冲影响，**不等于网卡瞬时峰值保证**。TCP/TLS/HTTP 开销、ACK、重传、DNS/IP 查询不包含在额度内；仅下行也有必要请求和 ACK 上行。
+
+失败中已收到的有效负载也计入额度，完整确认量另外显示。崩溃时未结算预留最多 2 MiB 保守计入，避免重启超额。首次/手动实测额外计量，不扣正式额度，换源可能增加测试用量。修改配置不会清零当天计数。
+
+## 日常命令
+
+```bash
+# 实际配置和今日进度
+sudo traffic-scheduler status
+traffic-scheduler --version
+
+# 随时真实下载 10 MB，使用保存的限速和地区，内容自动清理
+sudo -u traffic-scheduler traffic-scheduler test --mb 10
+
+# 日志与每分钟检查时间
+sudo journalctl -u traffic-scheduler.service -n 80 --no-pager
+systemctl list-timers traffic-scheduler.timer
+
+# 停用，包括正在执行的下载
+sudo systemctl disable --now traffic-scheduler.timer
+sudo systemctl stop traffic-scheduler.service
+```
+
+修改推荐重新运行安装器，明确传参数，它会停止任务、保存、实测再激活。已安装 2.1.0 也可：
+
+```bash
+sudo systemctl disable --now traffic-scheduler.timer
+sudo systemctl stop traffic-scheduler.service
+sudo traffic-scheduler configure --gb 12 --mbps 3 --region cn --builtin && sudo -u traffic-scheduler traffic-scheduler test --mb 10 && sudo systemctl enable --now traffic-scheduler.timer
+```
+
+不传参数的 `traffic-scheduler configure` 为交互设置。改变后必须重新实测，未经验证的配置无法调度；不要删除当天 `quota-YYYY-MM-DD.json` 来修改设置。
+
+## 卸载
+
+```bash
+# 保留配置及计量
 sudo bash install-traffic-scheduler.sh --uninstall
 
-# 连同本程序的配置和进度一并移除
+# 同时清除本程序配置和计量
 sudo bash install-traffic-scheduler.sh --uninstall --purge
 ```
 
-安装新版会停止并移除旧 `cn-traffic.timer`、`cn-traffic.service` 和旧可执行程序，防止双任务叠加。旧 `/etc/cn-traffic.json`、`/var/lib/cn-traffic/` 和旧服务账户不会自动删除，也不会将旧版下行计数误作新版上行计数。
+升级停用旧 `cn-traffic.timer/service`，防止双任务叠加；旧 `/etc/cn-traffic.json`、`/var/lib/cn-traffic/` 和账户不自动删除。
 
-## 开发与验证
+## 开发验证
 
 ```bash
 python3 -m unittest -v
 bash -n install.sh
 ```
 
-测试包含真实本地 HTTP 收发、上传接收确认、部分失败计数、限额尾块、随机计划、双向独立计量、重启预留恢复、区域限制、假 IP DNS 回退、限速节奏和临时文件清理。CI 在 Linux/Python 3.8 与 3.12 下运行；Windows 本地不运行 fcntl 专属测试。
-
-网络验证只进行小流量实测，未用第三方节点试跑 20 GB。首次安装会在你的目标 Ubuntu 上验证 systemd 文件和实际连通性。公网节点的可用性不是永久承诺。
-
-参考：[Cloudflare Speed Test 接口](https://github.com/cloudflare/speedtest)、[systemd.timer](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html)、[IP 归属接口](https://ipwhois.io/documentation)。
+CI 在 Ubuntu/Python 3.8、3.12 覆盖配置迁移、交互和命令行保存、实际请求额度与限速参数、随机计划、日期切换、区域校验、失败换源、并发锁、崩溃预留和匿名文件清理。开发端仅做小流量联网实测，未用公共源持续下载 20 GB。

@@ -15,4 +15,4 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m unittest -v
       - run: bash -n install.sh
-      - run: python -m py_compile traffic_scheduler.py receiver.py
+      - run: python -m py_compile traffic_scheduler.py

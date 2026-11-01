@@ -1,18 +1,11 @@
 {
-  "version": 2,
+  "version": 3,
   "timezone": "Asia/Shanghai",
   "directions": {
-    "upload": {
+    "download": {
       "enabled": true,
       "daily_bytes": 20000000000,
-      "mbps": 10,
-      "region": "cn",
-      "targets": []
-    },
-    "download": {
-      "enabled": false,
-      "daily_bytes": 20000000000,
-      "mbps": 10,
+      "mbps": 5,
       "region": "cn",
       "targets": []
     }

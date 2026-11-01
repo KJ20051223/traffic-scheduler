@@ -5,14 +5,24 @@ export DEBIAN_FRONTEND=noninteractive
 defaults=0
 uninstall=0
 purge=0
-for option in "$@"; do
-    case "$option" in
+config_args=()
+noninteractive=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --defaults) defaults=1 ;;
         --uninstall) uninstall=1 ;;
         --purge) purge=1 ;;
-        *) echo '用法: sudo bash install.sh [--defaults | --uninstall [--purge]]' >&2; exit 2 ;;
+        --gb|--mbps|--region|--url)
+            [[ $# -ge 2 ]] || { echo "$1 缺少参数" >&2; exit 2; }
+            config_args+=("$1" "$2")
+            shift
+            ;;
+        --builtin) config_args+=("$1") ;;
+        *) echo '用法: sudo bash install.sh [--gb 每日GB --mbps Mbps --region cn|overseas --builtin|--url URL] [--defaults] | --uninstall [--purge]' >&2; exit 2 ;;
     esac
+    shift
 done
+if [[ $defaults -eq 1 || ${#config_args[@]} -gt 0 ]]; then noninteractive=1; fi
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash install.sh' >&2; exit 1; }
 [[ -d /run/systemd/system ]] || { echo '需要启用了 systemd 的 Ubuntu 20.04+' >&2; exit 1; }
 if [[ $uninstall -eq 1 ]]; then
@@ -32,8 +42,8 @@ fi
 [[ ${ID:-} == ubuntu ]] && dpkg --compare-versions "${VERSION_ID:-0}" ge 20.04 || {
     echo '支持 Ubuntu 20.04 或更新版本' >&2; exit 1;
 }
-if [[ $defaults -eq 0 && ! -t 0 ]]; then
-    echo '交互安装需要终端。请先下载 install.sh 再 sudo bash install.sh，或使用 --defaults。' >&2
+if [[ $noninteractive -eq 0 && ! -t 0 ]]; then
+    echo '交互安装需要终端。请先下载 install.sh 再 sudo bash install.sh，或指定 --gb 和 --mbps。' >&2
     exit 1
 fi
 apt-get update
@@ -52,7 +62,7 @@ install -d -m 0750 -o root -g traffic-scheduler /etc/traffic-scheduler
 install -d -m 0700 -o traffic-scheduler -g traffic-scheduler /var/lib/traffic-scheduler
 cat > /usr/local/bin/traffic-scheduler <<'TRAFFIC_SCHEDULER_PY'
 #!/usr/bin/env python3
-"""Traffic Scheduler: bounded, geofenced, randomly distributed daily transfers."""
+"""Traffic Scheduler: download-only daily quotas, rate limits and random time slices."""
 import argparse
 import contextlib
 import datetime as dt
@@ -73,18 +83,18 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '2.0.1'
+VERSION = '2.1.0'
 CONFIG = Path('/etc/traffic-scheduler/config.json')
 STATE = Path('/var/lib/traffic-scheduler')
 BJ = dt.timezone(dt.timedelta(hours=8))
 BLOCK = 32 * 1024
 PIECE = 2 * 1024 * 1024
 UA = 'traffic-scheduler/' + VERSION
-DIRECTIONS = ('upload', 'download')
-LABEL = {'upload': '上行', 'download': '下行'}
+DIRECTIONS = ('download',)
+LABEL = {'download': '下行'}
 ERRORS = (OSError, ValueError, http.client.HTTPException)
 
-# Public download sources and speed-test endpoints. Setup validates on the user's host.
+# Public download sources. Setup validates on the user's host.
 # Failed/restricted HUST/USTC/SJTU endpoints deliberately are not in these defaults.
 BUILTINS = {
     'download': {
@@ -94,15 +104,6 @@ BUILTINS = {
         ],
         'overseas': [
             {'name': 'Cloudflare', 'kind': 'generated', 'url': 'https://speed.cloudflare.com/__down'},
-        ],
-    },
-    'upload': {
-        'cn': [
-            {'name': '南京移动测速 194', 'kind': 'speedtest_cn', 'url': 'https://node-183-213-92-194.speedtest.cn:51090/upload'},
-            {'name': '南京移动测速 198', 'kind': 'speedtest_cn', 'url': 'https://node-183-213-92-198.speedtest.cn:51090/upload'},
-        ],
-        'overseas': [
-            {'name': 'Cloudflare', 'kind': 'post', 'url': 'https://speed.cloudflare.com/__up'},
         ],
     },
 }
@@ -139,10 +140,26 @@ def atomic_json(path, data):
 
 
 def default_config():
-    return {'version': 2, 'timezone': 'Asia/Shanghai', 'directions': {
-        'upload': {'enabled': True, 'daily_bytes': 20_000_000_000, 'mbps': 10, 'region': 'cn', 'targets': []},
-        'download': {'enabled': False, 'daily_bytes': 20_000_000_000, 'mbps': 10, 'region': 'cn', 'targets': []},
+    return {'version': 3, 'timezone': 'Asia/Shanghai', 'directions': {
+        'download': {'enabled': True, 'daily_bytes': 20_000_000_000, 'mbps': 5, 'region': 'cn', 'targets': []},
     }}
+
+
+def migrate_config(config):
+    if config.get('version') != 2:
+        return config
+    # Preserve the ACTIVE old settings, not the unused download defaults (20 GB/10 Mbps).
+    directions = config.get('directions', {})
+    download = directions.get('download', {})
+    if download.get('enabled'):
+        item = dict(download)
+    elif directions.get('upload', {}).get('enabled'):
+        item = dict(directions['upload'])
+        item['targets'] = []  # An upload receiver is not a downloadable file.
+    else:
+        raise ValueError('旧配置没有启用方向，请重新设置')
+    item['enabled'] = True
+    return {'version': 3, 'timezone': config.get('timezone'), 'directions': {'download': item}}
 
 
 def parse_url(url):
@@ -160,13 +177,15 @@ def targets(config, direction):
 
 
 def validate(config):
-    if config.get('version') != 2 or config.get('timezone') != 'Asia/Shanghai':
+    if config.get('version') != 3 or config.get('timezone') != 'Asia/Shanghai':
         raise ValueError('配置版本或时区无效')
+    if set(config.get('directions', {})) != {'download'}:
+        raise ValueError('本版本仅支持下行，请重新设置或运行安装器迁移旧配置')
     active_seconds = 0
     for direction in DIRECTIONS:
         item = config['directions'][direction]
-        if type(item.get('enabled')) is not bool:
-            raise ValueError('enabled 必须为布尔值')
+        if item.get('enabled') is not True:
+            raise ValueError('下行必须启用')
         if type(item.get('daily_bytes')) is not int or item['daily_bytes'] <= 0:
             raise ValueError('每日额度必须为正整数字节数')
         rate = item.get('mbps')
@@ -178,24 +197,19 @@ def validate(config):
             raise ValueError('targets 必须为列表')
         for target in targets(config, direction):
             parse_url(target['url'])
-            if target.get('kind') not in ('range', 'generated', 'post', 'stream', 'receiver', 'speedtest_cn'):
+            if target.get('kind') not in ('range', 'generated', 'stream'):
                 raise ValueError('目标 kind 无效')
-            if target.get('kind') == 'speedtest_cn' and direction != 'upload':
-                raise ValueError('speedtest_cn 仅用于上行')
         if item['enabled']:
             active_seconds += item['daily_bytes'] / (rate * 125000)
             if not targets(config, direction):
-                raise ValueError('{}尚无可用内置目标，请输入已授权的自定义上传接收 URL'.format(LABEL[direction]))
-    if not any(config['directions'][d]['enabled'] for d in DIRECTIONS):
-        raise ValueError('至少启用一个方向')
-    # A single worker alternates directions, preserving each configured speed ceiling.
+                raise ValueError('当前区域没有可用下载目标')
     if active_seconds > 86400 * 0.70:
         raise ValueError('按当前速度需运行 {:.1f} 小时，超过可安排的每日预算；请降低额度或提高速度'.format(active_seconds / 3600))
     return config
 
 
 def load_config(path):
-    return validate(json.loads(path.read_text(encoding='utf-8')))
+    return validate(migrate_config(json.loads(path.read_text(encoding='utf-8'))))
 
 
 @contextlib.contextmanager
@@ -211,9 +225,8 @@ def locked(directory):
 
 
 def new_day(day):
-    return {'date': day, 'upload': {'bytes': 0, 'confirmed': 0, 'reserved': 0},
-            'download': {'bytes': 0, 'confirmed': 0, 'reserved': 0},
-            'test_upload': 0, 'test_download': 0, 'plan': None, 'last_tick': None}
+    return {'date': day, 'download': {'bytes': 0, 'confirmed': 0, 'reserved': 0},
+            'plan': None, 'last_tick': None}
 
 
 def read_day(path, day):
@@ -408,6 +421,8 @@ def download_url(target, amount):
 
 
 def transfer(network, direction, item, target, amount, directory, data, path, pacer):
+    if direction != 'download':
+        raise ValueError('本版本仅支持下行下载')
     entry = data[direction]
     entry['reserved'] = amount
     atomic_json(path, data)
@@ -415,41 +430,11 @@ def transfer(network, direction, item, target, amount, directory, data, path, pa
     confirmed = False
     started = time.monotonic()
     conn = response = None
-    url = download_url(target, amount) if direction == 'download' else target['url']
+    url = download_url(target, amount)
     try:
         for _ in range(5):
             conn, p, address, country = network.connect(url, item['region'])
             headers = {'User-Agent': UA, 'Accept-Encoding': 'identity', 'Connection': 'close'}
-            if direction == 'upload':
-                headers.update({'Content-Type': 'application/octet-stream', 'Content-Length': str(amount)})
-                conn.putrequest('POST', request_path(p))
-                for key, value in headers.items():
-                    conn.putheader(key, value)
-                conn.endheaders()
-                random_block = os.urandom(BLOCK)
-                while actual < amount:
-                    size = min(BLOCK, amount - actual)
-                    pacer.wait(size)
-                    actual += size  # Conservative if sendall fails after a partial socket write.
-                    conn.send(random_block[:size])
-                response = conn.getresponse()
-                if response.status not in (200, 201, 204):
-                    raise OSError('上传被拒绝 HTTP {}（已发送仍计入额度）'.format(response.status))
-                body = response.read(8193)
-                if len(body) > 8192 or 'text/html' in response.getheader('Content-Type', '').lower():
-                    raise OSError('上传端返回网页，未验证为接收端')
-                if target['kind'] == 'receiver':
-                    if json.loads(body).get('received_bytes') != actual:
-                        raise OSError('接收端确认字节数不符')
-                elif target['kind'] == 'speedtest_cn':
-                    receipt = re.fullmatch(rb'\s*upload size:(\d+)\s*', body)
-                    if not receipt or int(receipt.group(1)) != actual:
-                        raise OSError('大陆测速接收端未确认完整字节数')
-                elif re.fullmatch(rb'\s*size=\d+\s*', body):
-                    if int(body.strip().split(b'=')[1]) != actual:
-                        raise OSError('测速接收端确认字节数不符')
-                confirmed = True
-                break
             headers['Range'] = 'bytes=0-{}'.format(amount - 1)
             conn.request('GET', request_path(p), headers=headers)
             response = conn.getresponse()
@@ -609,6 +594,9 @@ def tick(config, directory):
         if seconds < 3:
             return 0
         network = Network(load_geo(directory))
+        item = config['directions']['download']
+        log('执行下行：每日 {:g} GB，限速 {:g} Mbps，区域 {}；今日已计量 {:.6f} GB'.format(
+            item['daily_bytes'] / 1e9, item['mbps'], item['region'], data['download']['bytes'] / 1e9))
         try:
             with deadline(seconds):
                 jitter = min(data['plan']['jitter'], max(0, seconds - 3))
@@ -616,8 +604,7 @@ def tick(config, directory):
                 run_session(config, data, path, directory, network)
                 log('今日配置的计量额度已用完，已确认接收量可通过 status 查看')
         except Stop:
-            log('本次随机时段结束，上行={} GB，下行={} GB'.format(
-                round(data['upload']['bytes'] / 1e9, 4), round(data['download']['bytes'] / 1e9, 4)))
+            log('本次随机时段结束，下行={:.6f} GB'.format(data['download']['bytes'] / 1e9))
         finally:
             atomic_json(directory / 'geo.json', network.cache)
         return 0
@@ -631,20 +618,16 @@ def real_test(config, directory, megabytes=10):
     for d in DIRECTIONS:
         test_config['directions'][d]['daily_bytes'] = size
     network = Network(load_geo(directory))
+    item = config['directions']['download']
+    log('仅下行实测 {:g} MB；配置每日 {:g} GB，限速 {:g} Mbps，区域 {}'.format(
+        megabytes, item['daily_bytes'] / 1e9, item['mbps'], item['region']))
     with tempfile.TemporaryDirectory(prefix='test-', dir=str(directory)) as temporary:
         test_dir = Path(temporary)
         data = new_day(now().date().isoformat())
         start = time.monotonic()
         try:
             with deadline(max(180, remaining_seconds(test_config, data) * 4 + 60)):
-                # Test only selected directions; when both are selected, download first.
-                for direction in ('download', 'upload'):
-                    if not test_config['directions'][direction]['enabled']:
-                        continue
-                    single = json.loads(json.dumps(test_config))
-                    for other in DIRECTIONS:
-                        single['directions'][other]['enabled'] = other == direction
-                    run_session(single, data, test_dir / 'test.json', test_dir, network, metric='confirmed')
+                run_session(test_config, data, test_dir / 'test.json', test_dir, network, metric='confirmed')
         finally:
             atomic_json(directory / 'geo.json', network.cache)
         for d in DIRECTIONS:
@@ -654,7 +637,7 @@ def real_test(config, directory, megabytes=10):
                           for d in DIRECTIONS if test_config['directions'][d]['enabled'])
         log('实测通过：{}，耗时 {:.1f} 秒；测试流量单独计量'.format(results, time.monotonic() - start))
         atomic_json(directory / 'last-test.json', {'at': now().isoformat(), 'version': VERSION,
-                    'upload': data['upload'], 'download': data['download'],
+                    'download': data['download'],
                     'config_hash': hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()})
 
 
@@ -663,40 +646,39 @@ def prompt(text, default):
     return answer or str(default)
 
 
-def wizard(path):
+def configure(path, args):
     config = load_config(path) if path.exists() else default_config()
-    print('\n流量调度设置（北京时间，全天随机分散；GB=10^9 字节，Mbps=兆比特/秒）')
-    print('上行=服务器向目标上传；下行=服务器从目标下载。双向按各自额度交替执行。')
-    enabled = [d for d in DIRECTIONS if config['directions'][d]['enabled']]
-    choice = prompt('模式：1 上行 / 2 下行 / 3 双向',
-                    '3' if len(enabled) == 2 else ('1' if 'upload' in enabled else '2'))
-    if choice not in ('1', '2', '3'):
-        raise ValueError('模式只能选 1、2、3')
-    for direction in DIRECTIONS:
-        item = config['directions'][direction]
-        item['enabled'] = choice == '3' or choice == ('1' if direction == 'upload' else '2')
-        if not item['enabled']:
-            continue
-        print('\n设置' + LABEL[direction])
-        quota = float(prompt('每日流量 GB', item['daily_bytes'] / 1e9))
-        if not math.isfinite(quota) or quota <= 0:
-            raise ValueError('每日流量必须是有限正数')
-        item['daily_bytes'] = int(quota * 1e9)
-        item['mbps'] = float(prompt('速度上限 Mbps', item['mbps']))
+    item = config['directions']['download']
+    explicit = args.keep or args.builtin or any(value is not None for value in
+                                               (args.gb, args.mbps, args.region, args.url))
+    if not explicit:
+        print('\n仅下行设置（北京时间，全天随机分散；GB=10^9 字节，Mbps=兆比特/秒）')
+        args.gb = float(prompt('每日下载流量 GB', item['daily_bytes'] / 1e9))
+        args.mbps = float(prompt('下载速度上限 Mbps', item['mbps']))
         region = prompt('目标：1 中国大陆 / 2 海外（含港澳台）', '2' if item['region'] == 'overseas' else '1')
         if region not in ('1', '2'):
             raise ValueError('目标只能选 1 或 2')
-        item['region'] = 'cn' if region == '1' else 'overseas'
-        if direction == 'upload' and item['region'] == 'cn':
-            print('内置大陆上行使用测速接收端，测试时会核对对端确认的字节数。')
+        args.region = 'cn' if region == '1' else 'overseas'
+        current = item.get('targets', [])
+        custom = prompt('自定义下载 HTTP(S) 地址（输入 builtin 使用内置）', current[0]['url'] if current else '').strip()
+        args.url = custom if custom and custom != 'builtin' else None
+        args.builtin = not args.url
+    if args.gb is not None:
+        quota = args.gb
+        if not math.isfinite(quota) or quota <= 0 or not math.isfinite(quota * 1e9):
+            raise ValueError('每日流量必须是有限正数')
+        item['daily_bytes'] = int(quota * 1e9)
+    if args.mbps is not None:
+        item['mbps'] = args.mbps
+    if args.region is not None:
+        if args.region != item['region']:
+            item['targets'] = []
+        item['region'] = args.region
+    if args.builtin:
         item['targets'] = []
-        custom = prompt('自定义 HTTP(S) 地址（直接回车使用内置）', '').strip()
-        if custom:
-            parse_url(custom)
-            item['targets'] = [{'name': '自定义目标', 'url': custom,
-                               'kind': 'post' if direction == 'upload' else 'stream'}]
-        if not targets(config, direction):
-            raise ValueError('当前区域暂无已验证的公共上传端。请填写你有权使用的接收 URL；不会切换到其他区域冒充成功。')
+    if args.url is not None:
+        parse_url(args.url)
+        item['targets'] = [{'name': '自定义下载目标', 'url': args.url, 'kind': 'stream'}]
     validate(config)
     atomic_json(path, config)
     if os.name == 'posix' and os.geteuid() == 0:
@@ -706,8 +688,14 @@ def wizard(path):
             os.chmod(str(path), 0o640)
         except KeyError:
             pass
-    print('\n配置已保存：' + str(path))
-    print('接下来必须进行真实下载/上传测试，测试通过后安装器才会启用定时任务。')
+    saved = load_config(path)
+    if saved != config:
+        raise OSError('配置回读不一致，拒绝继续')
+    item = saved['directions']['download']
+    print('\n配置已保存并回读确认：' + str(path.resolve()))
+    print('仅下行 | 每日 {:g} GB | 限速 {:g} Mbps | 区域 {} | {}'.format(
+        item['daily_bytes'] / 1e9, item['mbps'], item['region'], '自定义目标' if item['targets'] else '内置目标'))
+    print('需要真实下载测试通过后再启用定时任务；修改设置不会清零当天进度。')
 
 
 def status(config, directory):
@@ -733,16 +721,24 @@ def main():
     parser.add_argument('--config', type=Path, default=CONFIG)
     parser.add_argument('--state-dir', type=Path, default=STATE)
     commands = parser.add_subparsers(dest='command', required=True)
-    commands.add_parser('configure', help='交互设置；修改后需要 test 再启动定时任务')
+    settings = commands.add_parser('configure', help='仅下行设置；无参数交互，修改后需要 test')
+    settings.add_argument('--gb', type=float, help='每日下载 GB 数')
+    settings.add_argument('--mbps', type=float, help='下载速度上限 Mbps')
+    settings.add_argument('--region', choices=('cn', 'overseas'))
+    target = settings.add_mutually_exclusive_group()
+    target.add_argument('--url', help='自定义下载文件 HTTP(S) URL')
+    target.add_argument('--builtin', action='store_true', help='使用所选区域内置目标')
+    settings.add_argument('--keep', action='store_true', help='保留已有数值并迁移为仅下行；首次使用默认值')
     commands.add_parser('tick', help='执行当前随机时间片')
-    commands.add_parser('status', help='显示今日上下行进度')
-    test = commands.add_parser('test', help='任何时间真实传输，只测试启用的方向，默认每方向 10MB')
+    commands.add_parser('status', help='显示今日下行进度')
+    test = commands.add_parser('test', help='任何时间真实下载，默认 10MB')
     test.add_argument('--mb', type=float, default=10)
     args = parser.parse_args()
     if args.command == 'configure':
-        wizard(args.config)
+        configure(args.config, args)
         return 0
     config = load_config(args.config)
+    print('读取配置：' + str(args.config.resolve()), flush=True)
     if args.command == 'status':
         status(config, args.state_dir)
         return 0
@@ -767,22 +763,16 @@ if __name__ == '__main__':
 TRAFFIC_SCHEDULER_PY
 chmod 0755 /usr/local/bin/traffic-scheduler
 trap 'echo "安装未完成：定时任务尚未启用。查看上方错误；修复网络或目标后重新执行本脚本。" >&2' ERR
-if [[ $defaults -eq 1 ]]; then
-    if [[ ! -f /etc/traffic-scheduler/config.json ]]; then
-        /usr/bin/python3 - <<'TRAFFIC_DEFAULTS'
-import runpy
-m = runpy.run_path('/usr/local/bin/traffic-scheduler')
-m['atomic_json'](m['CONFIG'], m['default_config']())
-TRAFFIC_DEFAULTS
-    fi
+if [[ $noninteractive -eq 1 ]]; then
+    /usr/bin/python3 /usr/local/bin/traffic-scheduler --config /etc/traffic-scheduler/config.json configure --keep "${config_args[@]}"
 else
-    /usr/bin/python3 /usr/local/bin/traffic-scheduler configure
+    /usr/bin/python3 /usr/local/bin/traffic-scheduler --config /etc/traffic-scheduler/config.json configure
 fi
 chown root:traffic-scheduler /etc/traffic-scheduler/config.json
 chmod 0640 /etc/traffic-scheduler/config.json
 cat > /etc/systemd/system/traffic-scheduler.service <<'TRAFFIC_SERVICE'
 [Unit]
-Description=Random daily upload and download traffic budget
+Description=Random daily download-only traffic budget
 Wants=network-online.target
 After=network-online.target
 
@@ -790,7 +780,7 @@ After=network-online.target
 Type=simple
 User=traffic-scheduler
 Group=traffic-scheduler
-ExecStart=/usr/bin/python3 -u /usr/local/bin/traffic-scheduler tick
+ExecStart=/usr/bin/python3 -u /usr/local/bin/traffic-scheduler --config /etc/traffic-scheduler/config.json tick
 RuntimeMaxSec=57s
 TimeoutStopSec=5s
 StateDirectory=traffic-scheduler
@@ -819,27 +809,27 @@ Unit=traffic-scheduler.service
 [Install]
 WantedBy=timers.target
 TRAFFIC_TIMER
-/usr/bin/python3 /usr/local/bin/traffic-scheduler status
+/usr/bin/python3 /usr/local/bin/traffic-scheduler --config /etc/traffic-scheduler/config.json status
 systemd-analyze calendar '*-*-* *:*:00 Asia/Shanghai' >/dev/null
 systemd-analyze verify /etc/systemd/system/traffic-scheduler.service /etc/systemd/system/traffic-scheduler.timer
 systemctl daemon-reload
 echo
 while true; do
-    echo '开始真实传输测试：只测所选方向，每个启用方向 10MB；保留设置中的限速和地区校验。'
-    if runuser -u traffic-scheduler -- /usr/bin/python3 -u /usr/local/bin/traffic-scheduler test --mb 10; then
+    echo '开始真实下载测试：仅下行 10MB，使用刚保存的限速、地区和目标；测试内容自动清理。'
+    if runuser -u traffic-scheduler -- /usr/bin/python3 -u /usr/local/bin/traffic-scheduler --config /etc/traffic-scheduler/config.json test --mb 10; then
         break
     fi
     echo >&2
     echo '实测未通过，定时任务保持停用。已保存的额度、速度和当日进度不会清零。' >&2
-    echo '若大陆上行失败：需更换能接收上传的大陆目标，或主动选择海外；下载镜像不能代替上行。' >&2
-    if [[ $defaults -eq 1 || ! -t 0 ]]; then
+    echo '请更换可访问的下载文件地址或区域后重试。' >&2
+    if [[ $noninteractive -eq 1 || ! -t 0 ]]; then
         exit 1
     fi
     echo '1 重新设置（可更换区域或自定义地址）  2 按原设置重试  3 退出'
     read -r -p '请选择 [1]: ' retry_choice
     case "${retry_choice:-1}" in
         1)
-            /usr/bin/python3 /usr/local/bin/traffic-scheduler configure
+            /usr/bin/python3 /usr/local/bin/traffic-scheduler --config /etc/traffic-scheduler/config.json configure
             chown root:traffic-scheduler /etc/traffic-scheduler/config.json
             chmod 0640 /etc/traffic-scheduler/config.json
             ;;
@@ -851,7 +841,9 @@ done
 systemctl enable --now traffic-scheduler.timer
 trap - ERR
 echo
-echo '安装并实测通过，已启用全天随机分散任务。每天按北京时间重新计量。'
+echo '安装并实测通过，已启用仅下行任务，全天随机分散，每天按北京时间重新计量。'
+echo '实际生效的每日 GB、Mbps 与区域如下：'
+/usr/bin/python3 /usr/local/bin/traffic-scheduler --config /etc/traffic-scheduler/config.json status
 echo '状态: sudo traffic-scheduler status'
 echo '随时实测: sudo -u traffic-scheduler traffic-scheduler test --mb 10'
 echo '日志: sudo journalctl -u traffic-scheduler.service -f'
