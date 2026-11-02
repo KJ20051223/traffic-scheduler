@@ -202,13 +202,13 @@ while [[ $# -gt 0 ]]; do
         --defaults) defaults=1 ;;
         --uninstall) uninstall=1 ;;
         --purge) purge=1 ;;
-        --gb|--mbps|--region|--url)
+        --gb|--mbps|--region|--url|--hourly-weights)
             [[ $# -ge 2 ]] || { echo "$1 缺少参数" >&2; exit 2; }
             config_args+=("$1" "$2")
             shift
             ;;
         --builtin) config_args+=("$1") ;;
-        *) echo '用法: sudo bash install.sh [--gb 每日GB --mbps Mbps --region cn|overseas --builtin|--url URL] [--defaults] | --uninstall [--purge]' >&2; exit 2 ;;
+        *) echo '用法: sudo bash install.sh [--gb 每日GB --mbps Mbps --region cn|overseas --builtin|--url URL --hourly-weights estimated|uniform|24个数值] [--defaults] | --uninstall [--purge]' >&2; exit 2 ;;
     esac
     shift
 done
@@ -271,7 +271,13 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '2.2.0'
+VERSION = '2.3.0'
+PLAN_VERSION = 2
+PLAN_WORK_SECONDS = 40
+# Adjustable estimates, not measurements of real users or upload traffic.
+DEFAULT_HOURLY_WEIGHTS = [0.4, 0.25, 0.15, 0.1, 0.1, 0.15, 0.35, 0.6,
+                        0.9, 1.2, 1.4, 1.3, 1.0, 1.0, 1.4, 1.5,
+                        1.4, 1.2, 1.0, 1.2, 1.5, 1.6, 1.2, 0.8]
 CONFIG = Path('/etc/traffic-scheduler/config.json')
 STATE = Path('/var/lib/traffic-scheduler')
 BJ = dt.timezone(dt.timedelta(hours=8))
@@ -361,7 +367,7 @@ def atomic_json(path, data):
 
 
 def default_config():
-    return {'version': 3, 'timezone': 'Asia/Shanghai', 'directions': {
+    return {'version': 3, 'timezone': 'Asia/Shanghai', 'hourly_weights': list(DEFAULT_HOURLY_WEIGHTS), 'directions': {
         'download': {'enabled': True, 'daily_bytes': 20_000_000_000, 'mbps': 5, 'region': 'cn', 'targets': []},
     }}
 
@@ -408,6 +414,10 @@ def validate(config):
         raise ValueError('配置版本或时区无效')
     if set(config.get('directions', {})) != {'download'}:
         raise ValueError('本版本仅支持下行，请重新设置或运行安装器迁移旧配置')
+    weights = config.get('hourly_weights', DEFAULT_HOURLY_WEIGHTS)
+    if (not isinstance(weights, list) or len(weights) != 24
+            or any(type(w) not in (int, float) or not math.isfinite(w) or not 0 < w <= 1e6 for w in weights)):
+        raise ValueError('小时权重须为 24 个大于 0、不超过 1000000 的有限数值，顺序对应北京时间 0–23 点')
     active_seconds = 0
     for direction in DIRECTIONS:
         item = config['directions'][direction]
@@ -495,39 +505,69 @@ def remaining_seconds(config, data):
     return seconds
 
 
+def weighted_minutes(config, available, count, rng):
+    weights = config.get('hourly_weights', DEFAULT_HOURLY_WEIGHTS)
+    # Exponential-race sampling: weighted choices without duplicate minutes.
+    ranked = [(math.log(max(rng.random(), 1e-300)) / weights[n // 60], n) for n in available]
+    return [n for _, n in sorted(ranked, reverse=True)[:count]]
+
+
+def allocate_chunks(config, data, minutes, rng):
+    remaining = max(0, config['directions']['download']['daily_bytes'] - data['download']['bytes'])
+    if not minutes:
+        return {}
+    size, extra = divmod(remaining, len(minutes))
+    larger = set(rng.sample(minutes, extra))
+    return {str(minute): size + (minute in larger) for minute in minutes}
+
+
 def make_plan(config, data, moment, rng=None):
     rng = rng or random.SystemRandom()
     minute = moment.hour * 60 + moment.minute
-    available = list(range(minute, 1440))
-    # About 40 productive seconds per chosen minute, leaving DNS/TLS/retry headroom.
-    sessions = min(len(available), math.ceil(remaining_seconds(config, data) / 40))
-    chosen = sorted(rng.sample(available, sessions))
+    first = minute + (data.get('last_tick') == minute)
+    previous = data.get('plan') or {}
+    not_before = previous.get('not_before') if previous.get('version') == PLAN_VERSION else None
+    if type(not_before) is not int or not 10 <= not_before <= 60:
+        not_before = rng.randint(10, 60)
+    available = list(range(max(first, not_before), 1440))
+    # Each chosen minute has its own payload quota, about 40 productive seconds.
+    sessions = min(len(available), math.ceil(remaining_seconds(config, data) / PLAN_WORK_SECONDS))
+    chosen = sorted(weighted_minutes(config, available, sessions, rng))
     fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
-    return {'minutes': chosen, 'jitter': rng.randrange(0, 5), 'config_hash': fingerprint}
+    return {'version': PLAN_VERSION, 'minutes': chosen, 'not_before': not_before,
+            'chunks': allocate_chunks(config, data, chosen, rng), 'config_hash': fingerprint}
 
 
 def due(config, data, moment):
     if remaining_seconds(config, data) <= 0:
         return False
     minute = moment.hour * 60 + moment.minute
-    # If retries/slow sources reduce headroom, use every remaining minute to catch up.
-    pressure = remaining_seconds(config, data) > (1440 - minute) * 36
-    return minute in data['plan']['minutes'] or pressure
+    plan = data['plan']
+    return (minute >= plan.get('not_before', 0) and minute in plan['minutes']
+            and plan.get('chunks', {}).get(str(minute), 0) > 0)
 
 
 def extend_plan(config, data, moment, rng=None):
-    """Add random future slices when measured throughput needs more working time."""
+    """Randomly add slices and redistribute missed payload over future chunks."""
     rng = rng or random.SystemRandom()
     minute = moment.hour * 60 + moment.minute
     planned = set(data['plan']['minutes'])
-    future = set(range(minute, 1440))
-    needed = min(len(future), math.ceil(remaining_seconds(config, data) / 40))
+    first = minute + (data.get('last_tick') == minute)
+    future = set(range(max(first, data['plan'].get('not_before', 0)), 1440))
+    needed = min(len(future), math.ceil(remaining_seconds(config, data) / PLAN_WORK_SECONDS))
     extra = needed - len(planned & future)
+    changed = False
     if extra > 0:
-        planned.update(rng.sample(sorted(future - planned), extra))
+        planned.update(weighted_minutes(config, sorted(future - planned), extra, rng))
         data['plan']['minutes'] = sorted(planned)
-        return True
-    return False
+        changed = True
+    active = sorted(planned & future)
+    remaining = max(0, config['directions']['download']['daily_bytes'] - data['download']['bytes'])
+    chunks = data['plan'].get('chunks', {})
+    if changed or sum(chunks.get(str(n), 0) for n in active) != remaining:
+        data['plan']['chunks'] = allocate_chunks(config, data, active, rng)
+        changed = True
+    return changed
 
 
 def json_get(url, limit=256000):
@@ -753,7 +793,7 @@ def pick_direction(config, data, metric='bytes'):
     return min(choices, key=lambda d: data[d][metric] / config['directions'][d]['daily_bytes']) if choices else None
 
 
-def run_session(config, data, path, directory, network, metric='bytes', health=None, rng=None):
+def run_session(config, data, path, directory, network, metric='bytes', health=None, rng=None, max_bytes=None):
     health = health if health is not None else {}
     rng = rng or random.SystemRandom()
     pools = {d: shuffled_targets(config, d, rng) for d in DIRECTIONS}
@@ -761,7 +801,10 @@ def run_session(config, data, path, directory, network, metric='bytes', health=N
     failed = {d: set() for d in DIRECTIONS}
     attempts = {}
     pacers = {d: Pacer(config['directions'][d]['mbps']) for d in DIRECTIONS}
+    stop_at = None if max_bytes is None else data['download'][metric] + max_bytes
     while True:
+        if stop_at is not None and data['download'][metric] >= stop_at:
+            return True
         direction = pick_direction(config, data, metric)
         if direction is None:
             return True
@@ -785,6 +828,8 @@ def run_session(config, data, path, directory, network, metric='bytes', health=N
         # At a low configured speed, finish a request inside a short time slice.
         amount = min(PIECE, max(1, int(item['mbps'] * 125000 * 8)),
                      item['daily_bytes'] - data[direction][metric])
+        if stop_at is not None:
+            amount = min(amount, stop_at - data[direction][metric])
         before = data[direction]['confirmed']
         try:
             transfer(network, direction, item, target, amount, directory, data, path, pacers[direction])
@@ -831,7 +876,8 @@ def load_health(directory):
         return {}
 
 
-def tick(config, directory):
+def tick(config, directory, rng=None):
+    rng = rng or random.SystemRandom()
     with locked(directory):
         verified = json.loads((directory / 'last-test.json').read_text(encoding='utf-8'))
         fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
@@ -841,13 +887,16 @@ def tick(config, directory):
         path = directory / ('quota-' + moment.date().isoformat() + '.json')
         data = read_day(path, moment.date().isoformat())
         recover(data)
-        if not data.get('plan') or data['plan'].get('config_hash') != fingerprint:
-            data['plan'] = make_plan(config, data, moment)
+        if (not data.get('plan') or data['plan'].get('config_hash') != fingerprint
+                or data['plan'].get('version') != PLAN_VERSION):
+            data['plan'] = make_plan(config, data, moment, rng)
             atomic_json(path, data)
-            log('今日随机计划生成：{} 个分钟时段'.format(len(data['plan']['minutes'])))
-            if remaining_seconds(config, data) > (1440 - moment.hour * 60 - moment.minute) * 36:
+            gate = data['plan']['not_before']
+            log('今日随机分块计划生成：{} 个下载小块，最早允许 {:02d}:{:02d} 开始'.format(
+                len(data['plan']['minutes']), gate // 60, gate % 60))
+            if remaining_seconds(config, data) > (1440 - max(moment.hour * 60 + moment.minute, gate)) * PLAN_WORK_SECONDS:
                 log('今日剩余时间可能不足以刷足；将尽力传输，午夜按新日期计量，不虚报完成')
-        elif extend_plan(config, data, moment):
+        elif extend_plan(config, data, moment, rng):
             atomic_json(path, data)
         key = moment.hour * 60 + moment.minute
         if data.get('last_tick') == key or not due(config, data, moment):
@@ -862,14 +911,19 @@ def tick(config, directory):
         network = Network(load_geo(directory))
         health = load_health(directory)
         item = config['directions']['download']
+        chunk_bytes = data['plan']['chunks'][str(key)]
         log('执行下行：每日 {:g} GB，限速 {:g} Mbps，区域 {}；今日已计量 {:.6f} GB'.format(
             item['daily_bytes'] / 1e9, item['mbps'], item['region'], data['download']['bytes'] / 1e9))
+        log('本次小块额度 {:.3f} MB，完成后等待下个随机时段'.format(chunk_bytes / 1e6))
         try:
             with deadline(seconds):
-                jitter = min(data['plan']['jitter'], max(0, seconds - 3))
+                jitter = min(rng.uniform(0, 5), max(0, seconds - 3))
                 time.sleep(jitter)
-                run_session(config, data, path, directory, network, health=health)
-                log('今日配置的计量额度已用完，已确认接收量可通过 status 查看')
+                run_session(config, data, path, directory, network, health=health, max_bytes=chunk_bytes)
+                if data['download']['bytes'] >= item['daily_bytes']:
+                    log('今日配置的计量额度已用完，已确认接收量可通过 status 查看')
+                else:
+                    log('本次小块下载完成，等待下个随机时段')
         except Stop:
             log('本次随机时段结束，下行={:.6f} GB'.format(data['download']['bytes'] / 1e9))
         finally:
@@ -919,9 +973,10 @@ def prompt(text, default):
 
 def configure(path, args):
     config = load_config(path) if path.exists() else default_config()
+    config.setdefault('hourly_weights', list(DEFAULT_HOURLY_WEIGHTS))
     item = config['directions']['download']
     explicit = args.keep or args.builtin or any(value is not None for value in
-                                               (args.gb, args.mbps, args.region, args.url))
+                                               (args.gb, args.mbps, args.region, args.url, args.hourly_weights))
     if not explicit:
         print('\n仅下行设置（北京时间，全天随机分散；GB=10^9 字节，Mbps=兆比特/秒）')
         args.gb = float(prompt('每日下载流量 GB', item['daily_bytes'] / 1e9))
@@ -934,6 +989,16 @@ def configure(path, args):
         custom = prompt('自定义下载 HTTP(S) 地址（输入 builtin 使用内置）', current[0]['url'] if current else '').strip()
         args.url = custom if custom and custom != 'builtin' else None
         args.builtin = not args.url
+        weights = prompt('小时权重：estimated 估算 / uniform 均匀 / 24个逗号分隔数值；keep 保留', 'keep').strip()
+        if weights != 'keep':
+            args.hourly_weights = weights
+    if args.hourly_weights is not None:
+        if args.hourly_weights == 'estimated':
+            config['hourly_weights'] = list(DEFAULT_HOURLY_WEIGHTS)
+        elif args.hourly_weights == 'uniform':
+            config['hourly_weights'] = [1] * 24
+        else:
+            config['hourly_weights'] = [float(w.strip()) for w in args.hourly_weights.split(',')]
     if args.gb is not None:
         quota = args.gb
         if not math.isfinite(quota) or quota <= 0 or not math.isfinite(quota * 1e9):
@@ -968,11 +1033,21 @@ def configure(path, args):
         item['daily_bytes'] / 1e9, item['mbps'], item['region'], '自定义目标' if item['targets'] else '内置目标'))
     print('需要真实下载测试通过后再启用定时任务；修改设置不会清零当天进度。')
     print('下载源：{} 个，本次测试和每个调度时段均随机排列，失败自动换源。'.format(len(targets(saved, 'download'))))
+    print('按小时权重随机分块：{}；权重仅控制时间分配，不改变限速和每日总额度。'.format(weight_profile(saved)))
+
+
+def weight_profile(config):
+    weights = config.get('hourly_weights', DEFAULT_HOURLY_WEIGHTS)
+    if weights == DEFAULT_HOURLY_WEIGHTS:
+        return '默认估算作息（非真实用户统计）'
+    return '全天均匀' if weights == [1] * 24 else '自定义'
 
 
 def status(config, directory):
     data = read_day(directory / ('quota-' + now().date().isoformat() + '.json'), now().date().isoformat())
     print('Traffic Scheduler {} | 北京时间 {}'.format(VERSION, now().isoformat(timespec='seconds')))
+    print('时间权重: ' + weight_profile(config))
+    print('北京时间 0–23 点权重: ' + ','.join('{:g}'.format(w) for w in config.get('hourly_weights', DEFAULT_HOURLY_WEIGHTS)))
     for d in DIRECTIONS:
         item = config['directions'][d]
         print('{}: {} | {:.3f}/{:.3f} GB | 已确认 {:.3f} GB | 预留 {:.3f} MB | {} Mbps | {}'.format(
@@ -983,7 +1058,13 @@ def status(config, directory):
     if plan:
         minute = now().hour * 60 + now().minute
         future = [n for n in plan['minutes'] if n > minute]
+        if plan.get('version') == PLAN_VERSION:
+            gate = plan['not_before']
+            print('今日随机分块：{} 个时段；最早允许 {:02d}:{:02d} 开始'.format(
+                len(plan['minutes']), gate // 60, gate % 60))
         print('下次计划时段: ' + ('{:02d}:{:02d}'.format(future[0] // 60, future[0] % 60) if future else '今日无剩余随机时段，必要时自动补足'))
+        if future and plan.get('chunks', {}).get(str(future[0])):
+            print('下个小块额度: {:.3f} MB'.format(plan['chunks'][str(future[0])] / 1e6))
     print('额度按有效负载计量；协议开销、重传、首次/手动实测另计。')
 
 
@@ -997,6 +1078,7 @@ def main():
     settings.add_argument('--gb', type=float, help='每日下载 GB 数')
     settings.add_argument('--mbps', type=float, help='下载速度上限 Mbps')
     settings.add_argument('--region', choices=('cn', 'overseas'))
+    settings.add_argument('--hourly-weights', help='estimated 估算、uniform 均匀，或 24 个逗号分隔的正数（北京时间 0–23 点）')
     target = settings.add_mutually_exclusive_group()
     target.add_argument('--url', help='自定义下载文件 HTTP(S) URL')
     target.add_argument('--builtin', action='store_true', help='使用所选区域内置目标')
@@ -1087,7 +1169,7 @@ done
 systemctl enable --now traffic-scheduler.timer
 trap - ERR
 echo
-echo '安装并实测通过，已启用仅下行任务，全天随机分散，每天按北京时间重新计量。'
+echo '安装并实测通过，已启用仅下行任务，按小时权重随机分块，每天按北京时间重新计量；零点不会立即下载。'
 echo '实际生效的每日 GB、Mbps 与区域如下：'
 "$PYTHON_BIN" /usr/local/bin/traffic-scheduler --config /etc/traffic-scheduler/config.json status
 echo '状态: sudo traffic-scheduler status'

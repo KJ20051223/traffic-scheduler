@@ -196,8 +196,11 @@ class Tests(unittest.TestCase):
         self.assertEqual(plan['minutes'], list(range(1435, 1440)))
 
     def test_behind_schedule_catches_up(self):
-        self.data['plan'] = {'minutes': []}
+        self.data['plan'] = {'minutes': [], 'chunks': {}, 'not_before': 10}
         moment = dt.datetime(2026, 11, 1, 23, tzinfo=t.BJ)
+        self.assertFalse(t.due(self.config, self.data, moment))
+        self.assertTrue(t.extend_plan(self.config, self.data, moment, random.Random(1)))
+        self.assertEqual(self.data['plan']['minutes'], list(range(1380, 1440)))
         self.assertTrue(t.due(self.config, self.data, moment))
         self.data['download']['bytes'] = self.config['directions']['download']['daily_bytes']
         self.assertFalse(t.due(self.config, self.data, moment))
@@ -358,11 +361,184 @@ class Tests(unittest.TestCase):
             t.run_session(config, self.data, self.path, self.directory, self.net)
 
     def test_interactive_values_persist_and_are_read_back(self):
-        with patch('builtins.input', side_effect=['12.5', '3.5', '2', 'https://example.com/data']):
+        with patch('builtins.input', side_effect=['12.5', '3.5', '2', 'https://example.com/data', 'keep']):
             config = self.run_configure()
         item = config['directions']['download']
         self.assertEqual((item['daily_bytes'], item['mbps'], item['region']), (12_500_000_000, 3.5, 'overseas'))
         self.assertEqual(item['targets'][0]['url'], 'https://example.com/data')
+
+    def test_chunk_quotas_sum_exactly_and_scale_with_download_rate(self):
+        moment = dt.datetime(2026, 11, 1, tzinfo=t.BJ)
+        item = self.config['directions']['download']
+        item.update(daily_bytes=10_000_000_003, mbps=5)
+        plan = t.make_plan(self.config, self.data, moment, random.Random(3))
+        self.assertEqual(len(plan['minutes']), 401)
+        self.assertEqual(set(plan['chunks']), {str(n) for n in plan['minutes']})
+        self.assertEqual(sum(plan['chunks'].values()), item['daily_bytes'])
+        self.assertLessEqual(max(plan['chunks'].values()), 25_000_000)
+        self.assertGreater(max(plan['minutes']), 1320)
+        item['mbps'] = 10
+        faster = t.make_plan(self.config, self.data, moment, random.Random(3))
+        self.assertEqual(len(faster['minutes']), 201)
+        self.assertEqual(sum(faster['chunks'].values()), item['daily_bytes'])
+
+    def test_daily_random_gate_excludes_midnight_and_survives_replanning(self):
+        moment = dt.datetime(2026, 11, 1, tzinfo=t.BJ)
+        gates = set()
+        for seed in range(30):
+            data = t.new_day('2026-11-01')
+            plan = t.make_plan(self.config, data, moment, random.Random(seed))
+            gates.add(plan['not_before'])
+            self.assertGreaterEqual(min(plan['minutes']), plan['not_before'])
+            self.assertTrue(10 <= plan['not_before'] <= 60)
+            data['plan'] = plan
+            data['download']['observed_bps'] = 1000
+            t.extend_plan(self.config, data, moment, random.Random(seed + 50))
+            self.assertGreaterEqual(min(data['plan']['minutes']), plan['not_before'])
+            self.assertFalse(t.due(self.config, data, moment))
+            rebuilt = t.make_plan(self.config, data, moment, random.Random(seed + 100))
+            self.assertEqual(rebuilt['not_before'], plan['not_before'])
+        self.assertGreater(len(gates), 10)
+
+    def test_successful_chunk_keeps_future_schedule_and_quotas(self):
+        self.config['directions']['download']['daily_bytes'] = 10_000_000_000
+        moment = dt.datetime(2026, 11, 1, tzinfo=t.BJ)
+        plan = t.make_plan(self.config, self.data, moment, random.Random(4))
+        self.data['plan'] = plan
+        first = plan['minutes'][0]
+        self.data['download']['bytes'] = plan['chunks'][str(first)]
+        self.data['last_tick'] = first
+        original = json.dumps(plan, sort_keys=True)
+        same_minute = moment + dt.timedelta(minutes=first)
+        self.assertFalse(t.extend_plan(self.config, self.data, same_minute, random.Random(5)))
+        self.assertEqual(json.dumps(plan, sort_keys=True), original)
+
+    def test_missed_or_partial_chunk_is_redistributed_without_losing_quota(self):
+        self.config['directions']['download']['daily_bytes'] = 10_000_000_000
+        moment = dt.datetime(2026, 11, 1, tzinfo=t.BJ)
+        self.data['plan'] = t.make_plan(self.config, self.data, moment, random.Random(4))
+        first = self.data['plan']['minutes'][0]
+        self.data['download']['bytes'] = 3_000_001
+        self.data['last_tick'] = first
+        later = moment + dt.timedelta(minutes=first + 1)
+        self.assertTrue(t.extend_plan(self.config, self.data, later, random.Random(5)))
+        chunks = self.data['plan']['chunks']
+        self.assertEqual(sum(chunks.values()), 9_996_999_999)
+        self.assertTrue(all(int(n) > first for n in chunks))
+        self.assertTrue(all(0 < size <= 25_000_000 for size in chunks.values()))
+
+    def test_real_download_stops_at_chunk_quota_and_keeps_daily_remainder(self):
+        self.config['directions']['download'].update(daily_bytes=100, targets=[self.target('/file')])
+        with patch.object(t, 'Pacer', NoPacer):
+            t.run_session(self.config, self.data, self.path, self.directory, self.net, max_bytes=17)
+            self.assertEqual(self.data['download']['bytes'], 17)
+            t.run_session(self.config, self.data, self.path, self.directory, self.net, max_bytes=23)
+        self.assertEqual(self.data['download']['bytes'], 40)
+        self.assertEqual(self.data['download']['confirmed'], 40)
+        self.assertEqual(len(self.net.calls), 2)
+        self.assertFalse(list(self.directory.glob('payload-*')))
+
+    def test_old_plan_migrates_at_midnight_without_download_or_quota_reset(self):
+        moment = dt.datetime(2026, 11, 1, tzinfo=t.BJ)
+        fingerprint = t.hashlib.sha256(json.dumps(self.config, sort_keys=True).encode()).hexdigest()
+        t.atomic_json(self.directory / 'last-test.json', {'config_hash': fingerprint})
+        self.data['download']['bytes'] = 123
+        self.data['plan'] = {'minutes': [0, 1], 'config_hash': fingerprint, 'jitter': 0}
+        ledger = self.directory / 'quota-2026-11-01.json'
+        t.atomic_json(ledger, self.data)
+        with patch.object(t, 'locked', return_value=contextlib.nullcontext()), \
+                patch.object(t, 'now', return_value=moment), \
+                patch.object(t, 'Network', side_effect=AssertionError('midnight network request')):
+            self.assertEqual(t.tick(self.config, self.directory, random.Random(1)), 0)
+        updated = t.read_day(ledger, '2026-11-01')
+        self.assertEqual(updated['download']['bytes'], 123)
+        self.assertEqual(updated['plan']['version'], t.PLAN_VERSION)
+        self.assertEqual(sum(updated['plan']['chunks'].values()), 20_000_000_000 - 123)
+
+    def test_tick_uses_chunk_budget_and_independent_start_delays(self):
+        self.config['directions']['download']['daily_bytes'] = 10_000_000_000
+        fingerprint = t.hashlib.sha256(json.dumps(self.config, sort_keys=True).encode()).hexdigest()
+        t.atomic_json(self.directory / 'last-test.json', {'config_hash': fingerprint})
+        self.data['plan'] = {'version': t.PLAN_VERSION, 'not_before': 10, 'config_hash': fingerprint,
+                             'minutes': list(range(720, 1120)),
+                             'chunks': {str(n): 25_000_000 for n in range(720, 1120)}}
+        ledger = self.directory / 'quota-2026-11-01.json'
+        t.atomic_json(ledger, self.data)
+        network = self.net
+        network.cache = {}
+        budgets = []
+        def complete_chunk(config, data, path, *args, **kwargs):
+            budgets.append(kwargs['max_bytes'])
+            data['download']['bytes'] += kwargs['max_bytes']
+            data['download']['confirmed'] += kwargs['max_bytes']
+            t.atomic_json(path, data)
+        rng = random.Random(15)
+        with patch.object(t, 'locked', return_value=contextlib.nullcontext()), \
+                patch.object(t, 'Network', return_value=network), \
+                patch.object(t, 'deadline', side_effect=lambda seconds: contextlib.nullcontext()), \
+                patch.object(t.time, 'sleep') as sleep, patch.object(t, 'run_session', side_effect=complete_chunk):
+            for minute in (0, 1):
+                moment = dt.datetime(2026, 11, 1, 12, minute, tzinfo=t.BJ)
+                with patch.object(t, 'now', return_value=moment):
+                    self.assertEqual(t.tick(self.config, self.directory, rng), 0)
+        self.assertEqual(budgets, [25_000_000, 25_000_000])
+        delays = [call.args[0] for call in sleep.call_args_list]
+        self.assertEqual(len(delays), 2)
+        self.assertTrue(all(0 <= delay <= 5 for delay in delays))
+        self.assertNotEqual(delays[0], delays[1])
+        self.assertEqual(t.read_day(ledger, '2026-11-01')['download']['bytes'], 50_000_000)
+
+    def test_hourly_weights_bias_random_selection_without_duplicates(self):
+        candidates = list(range(1440))
+        low, high = 0, 0
+        for seed in range(50):
+            chosen = t.weighted_minutes(self.config, candidates, 150, random.Random(seed))
+            self.assertEqual(len(set(chosen)), 150)
+            low += sum(180 <= n < 240 for n in chosen)
+            high += sum(1260 <= n < 1320 for n in chosen)
+        self.assertGreater(high, low * 6)
+        self.config['hourly_weights'] = [1] * 24
+        self.assertEqual(t.weight_profile(self.config), '全天均匀')
+
+    def test_custom_weights_persist_and_invalid_weights_do_not_overwrite(self):
+        weights = ','.join(str(n + 1) for n in range(24))
+        config = self.run_configure('--hourly-weights', weights)
+        self.assertEqual(config['hourly_weights'], list(range(1, 25)))
+        path = self.directory / 'config.json'
+        before = path.read_bytes()
+        for invalid in ['1,2', ','.join(['0'] * 24), ','.join(['nan'] * 24), ','.join(['inf'] * 24)]:
+            with self.assertRaises(ValueError):
+                self.run_configure('--hourly-weights', invalid)
+            self.assertEqual(path.read_bytes(), before)
+        uniform = self.run_configure('--hourly-weights', 'uniform')
+        self.assertEqual(uniform['hourly_weights'], [1] * 24)
+        estimated = self.run_configure('--hourly-weights', 'estimated')
+        self.assertEqual(estimated['hourly_weights'], t.DEFAULT_HOURLY_WEIGHTS)
+
+    def test_full_day_simulation_completes_exact_quota_across_speeds_and_sizes(self):
+        midnight = dt.datetime(2026, 11, 1, tzinfo=t.BJ)
+        for quota, speed in [(10_000_000_003, 5), (20_000_000_000, 5), (10_000_000_000, 2)]:
+            with self.subTest(quota=quota, speed=speed):
+                self.config['directions']['download'].update(daily_bytes=quota, mbps=speed)
+                data = t.new_day('2026-11-01')
+                rng = random.Random(19)
+                data['plan'] = t.make_plan(self.config, data, midnight, rng)
+                original_minutes = list(data['plan']['minutes'])
+                executed = []
+                for minute in range(1440):
+                    moment = midnight + dt.timedelta(minutes=minute)
+                    t.extend_plan(self.config, data, moment, rng)
+                    if t.due(self.config, data, moment):
+                        chunk = data['plan']['chunks'][str(minute)]
+                        self.assertLessEqual(chunk, speed * 125000 * t.PLAN_WORK_SECONDS)
+                        data['download']['bytes'] += chunk
+                        data['last_tick'] = minute
+                        executed.append(minute)
+                        self.assertLessEqual(data['download']['bytes'], quota)
+                self.assertEqual(data['download']['bytes'], quota)
+                self.assertEqual(executed, original_minutes)
+                self.assertGreater(executed[-1], 1320)
+                self.assertEqual(data['plan']['minutes'], original_minutes)
 
     def test_invalid_cli_values_do_not_overwrite_good_config(self):
         self.run_configure('--gb', '7', '--mbps', '2')
