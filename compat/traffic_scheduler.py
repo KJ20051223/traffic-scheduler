@@ -21,7 +21,7 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '3.1.0'
+VERSION = '3.2.0'
 PLAN_VERSION = 2
 PLAN_WORK_SECONDS = 40
 # Adjustable estimates, not measurements of real users or upload traffic.

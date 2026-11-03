@@ -1,6 +1,6 @@
 # VPS Toolkit
 
-Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.1.0**。
+Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.2.0**。
 
 **升级保留已有下载任务的启停状态、原配置、当日统计与运行中的 Realm；新自动下载任务默认关闭。** 不修改 SSH、防火墙、安全组、系统 Python 或 libc，不新增网站、TLS 监听或远程管理端口。HTTPS 仅作为下载客户端使用。
 
@@ -30,6 +30,22 @@ sudo vps-toolkit wizard   # 健康检查 → Agent 审计 → 可选模块 → �
 sudo vps-toolkit health
 sudo vps-toolkit cloud show
 ```
+
+## 中文交互菜单（3.2.0）
+
+执行 `sudo vps-toolkit` 进入数字菜单。选择功能后清屏进入独立结果页，以中文状态、用量和分组报告显示结果；**输入 `0` 才返回上一级**，不会执行完立即刷回菜单。主菜单输入 `0` 退出，兼容原 `19` 退出。
+
+下载任务调度、Realm 规则和服务管理使用数字子菜单。操作失败也停留在结果页；无效选项会提示重新输入，Ctrl+C/输入结束可退出。规则修改、Agent 卸载、配置恢复等原有确认与权限检查保留。手动下载通过独立账户运行，其结果同样显示中文，不输出 JSON。
+
+独立命令默认仍输出 JSON，方便已有脚本读取。终端直接运行命令时，可在模块名前加 `--human`：
+
+```sh
+sudo vps-toolkit --human health
+sudo vps-toolkit --human traffic status
+sudo vps-toolkit --human agent audit
+```
+
+清屏使用终端控制序列，仅在终端输出时启用；重定向到日志不会写入清屏字符。界面更新保留原任务状态、配置、计量和累计比例设置。
 
 ## 手动下载：保留，且与自动任务共享预算
 

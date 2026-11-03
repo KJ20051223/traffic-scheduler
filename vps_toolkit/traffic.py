@@ -10,7 +10,7 @@ import uuid
 from urllib.parse import urlsplit
 from compat import traffic_scheduler as engine
 from .core import Context, Error, configuration, read_json, write_json
-from . import ratio
+from . import ratio, __version__
 
 
 def moment(timezone='system', timestamp=None):
@@ -152,7 +152,7 @@ def legacy_test(config, directory, megabytes):
     if result['status'] != 'completed':
         raise Error('手动测试未完整完成，当前配置未获得启用许可')
     engine.atomic_json(Path(directory) / 'last-test.json', {
-        'at': moment(settings['timezone']).isoformat(), 'version': 'vps-toolkit-3.1.0',
+        'at': moment(settings['timezone']).isoformat(), 'version': 'vps-toolkit-' + __version__,
         'download': {'bytes': result['received_bytes'], 'confirmed': result['received_bytes'], 'reserved': 0},
         'config_hash': hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()})
 

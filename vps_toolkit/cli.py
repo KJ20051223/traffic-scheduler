@@ -10,12 +10,24 @@ from .core import Context, Error, atomic, configuration, confirm, read_json, sav
 from .platform import detect, service
 
 
-def output(value):
-    print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
+def output(value, human=False, args=None):
+    if value is None:
+        return
+    if human:
+        from .presentation import render
+        render(value, args)
+    else:
+        print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 
-def parser():
-    p = argparse.ArgumentParser(description='VPS Toolkit：Linux 环境、Agent 官方管理、PF/Realm、授权下行测试')
+class HumanParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Error('输入有误：' + message)
+
+
+def parser(human=False):
+    p = (HumanParser if human else argparse.ArgumentParser)(description='VPS Toolkit：Linux 环境、Agent 官方管理、PF/Realm、授权下行测试')
+    p.add_argument('--human', action='store_true', help='显示中文可读结果；默认命令行输出 JSON')
     p.add_argument('--version', action='version', version='vps-toolkit ' + __version__)
     p.add_argument('--root', default='/', help='离线检查根目录；不允许执行宿主机服务操作')
     sub = p.add_subparsers(dest='module')
@@ -124,7 +136,10 @@ def download_child(ctx, args):
         except KeyError:
             raise Error('请先运行安装器建立独立下载账户')
         command = ['runuser', '-u', account.pw_name, '--', sys.executable,
-                   str(Path(__file__).resolve().parents[1] / 'run.py'), 'traffic', args.action]
+                   str(Path(__file__).resolve().parents[1] / 'run.py')]
+        if getattr(args, 'human', False):
+            command.append('--human')
+        command += ['traffic', args.action]
         for key in ('job', 'mb', 'gb', 'url', 'mbps', 'max_runtime', 'sha256'):
             value = getattr(args, key, None)
             if value is not None:
@@ -318,124 +333,42 @@ def dispatch(ctx, args):
 
 
 def wizard(ctx):
-    output(health.report(ctx))
-    output(agent.audit(ctx))
+    output(health.report(ctx), human=True)
+    output(agent.audit(ctx), human=True)
     print('操作计划：保留既有服务、配置和任务状态；Agent 卸载、Realm 重启和新定时下载均单独确认。')
     if input('是否进入 Agent 官方卸载菜单？[y/N]: ').strip().lower() == 'y':
         identifier = input('组件名（空白跳过）: ').strip()
         if identifier:
-            output(agent.remove(ctx, identifier, dry_run=True))
+            output(agent.remove(ctx, identifier, dry_run=True), human=True)
             print('先核实官方文档和程序 SHA256，再执行 agent remove；不会在向导中自动卸载。')
     if input('安装/修复 Realm 二进制？不重启现有服务。[y/N]: ').strip().lower() == 'y':
         ctx.require_root()
-        output(forwarder.install(ctx))
+        output(forwarder.install(ctx), human=True)
     if input('进行手动下载测试？将计入预算。[y/N]: ').strip().lower() == 'y':
         url = input('已获授权的测试 URL: ').strip()
         if url:
-            main(['traffic', 'authorize', url], ctx)
-            main(['traffic', 'download', '--mb', '10', '--url', url], ctx)
+            main(['traffic', 'authorize', url], ctx, human=True)
+            main(['traffic', 'download', '--mb', '10', '--url', url], ctx, human=True)
     if input('明确启用新下载定时任务？[y/N]: ').strip().lower() == 'y':
-        main(['traffic', 'enable'], ctx)
+        main(['traffic', 'enable'], ctx, human=True)
     return {'acceptance': health.report(ctx), 'backup': backup.create(ctx)}
 
 
 def menu(ctx):
-    labels = ['查看系统信息', '查看云平台信息', '检查客户机 Agent', '管理可选 Agent 官方卸载', '验证卸载结果',
-              '安装/修复 PF', 'Realm 转发规则管理', 'Realm 服务管理', '手动下行下载测试', '下载任务调度',
-              '流量统计', '网络诊断', 'SSH 与网络检查', '配置备份', '配置恢复', '查看日志', '更新管理工具',
-              '卸载管理工具', '退出']
-    while True:
-        print('\nVPS Toolkit ' + __version__)
-        for index, label in enumerate(labels, 1):
-            print('{}. {}'.format(index, label))
-        choice = input('请选择: ').strip()
-        if choice == '19':
-            return {'exit': True}
-        commands = {'1': ['info'], '2': ['cloud', 'show'], '3': ['agent', 'audit'], '5': ['agent', 'verify'],
-                    '6': ['pf', 'repair'], '11': ['traffic', 'status'], '12': ['network'], '13': ['health'],
-                    '14': ['backup', 'create'], '16': ['logs'], '17': ['update', '--check']}
-        if choice == '4':
-            component = input('组件（{}）: '.format(', '.join(agent.CATALOG))).strip()
-            if main(['agent', 'remove', component, '--dry-run'], ctx):
-                continue
-            if input('已核实上述官方计划，进入卸载确认？[y/N]: ').strip().lower() != 'y':
-                continue
-            command = ['agent', 'remove', component]
-            if component == 'cloud-init':
-                if input('确认网络和 SSH 已独立持久化，请输入 network-independent: ').strip() != 'network-independent':
-                    print('已取消')
-                    continue
-                command.append('--confirm-network-independent')
-            else:
-                script = input('官方卸载程序路径（留空使用已检测路径）: ').strip()
-                if script:
-                    command += ['--official-script', script]
-                command += ['--sha256', input('从可信官方发布物核实的程序 SHA256: ').strip()]
-                if agent.CATALOG[component].get('protected'):
-                    if input('已按官方流程完成控制台卸载授权？[y/N]: ').strip().lower() != 'y':
-                        print('已取消')
-                        continue
-                    command.append('--console-authorized')
-            # remove() still requires the component-specific final confirmation.
-            commands[choice] = command
-        elif choice == '7':
-            operation = input('list / add / edit / delete [list]: ').strip() or 'list'
-            command = ['pf', 'rule', operation]
-            if operation in ('edit', 'delete'):
-                command.append(input('规则序号（从0开始）: ').strip())
-            if operation in ('add', 'edit'):
-                command += ['--listen', input('监听 IP:端口: ').strip(), '--remote', input('目标地址:端口: ').strip(),
-                            '--protocol', input('tcp/udp/both [both]: ').strip() or 'both']
-            if operation != 'list' and input('保存后显式重启 Realm 应用？[y/N]: ').strip().lower() == 'y':
-                command.append('--apply')
-            commands[choice] = command
-        elif choice == '8':
-            commands[choice] = ['pf', 'service', input('start/stop/restart/enable/disable/status/logs: ').strip()]
-        elif choice == '9':
-            url = input('测试 URL: ').strip()
-            main(['traffic', 'authorize', url], ctx)
-            commands[choice] = ['traffic', 'download', '--url', url, '--mb', input('下载 MB [10]: ').strip() or '10']
-        elif choice == '10':
-            operation = input('status / enable / disable / pause / resume / stop / configure / ratio / ratio-seed: ').strip()
-            command = ['traffic', operation]
-            if operation == 'configure':
-                command += ['--daily-gb', input('每日预算 GB: ').strip(), '--monthly-gb', input('每月预算 GB: ').strip(),
-                            '--mbps', input('下载限速 Mbps: ').strip()]
-            elif operation == 'ratio':
-                command = ['traffic', 'configure', '--strategy', 'ratio',
-                           '--ratio', input('上行:下行 [1:2]: ').strip() or '1:2',
-                           '--ratio-interface', input('出口网卡 [auto]: ').strip() or 'auto',
-                           '--ratio-schedule', input('follow 实时补 / random 随机补 [follow]: ').strip() or 'follow']
-            elif operation == 'ratio-seed':
-                command += ['--upload-gb', input('当前全部累计上行 GB: ').strip(),
-                            '--download-gb', input('当前全部累计下行 GB: ').strip()]
-            commands[choice] = command
-        elif choice == '15':
-            commands[choice] = ['backup', 'restore', input('备份路径: ').strip(), '--apply']
-        elif choice == '18':
-            commands[choice] = ['uninstall']
-        elif choice == '17':
-            if main(['update', '--check'], ctx):
-                continue
-            if input('下载验证并更新管理工具？[y/N]: ').strip().lower() != 'y':
-                continue
-            commands[choice] = ['update']
-        if choice in commands:
-            try:
-                main(commands[choice], ctx)
-            except (Error, ValueError) as exc:
-                print('操作失败: ' + str(exc))
+    from .menu import menu as interactive_menu
+    return interactive_menu(ctx)
 
 
-def main(argv=None, ctx=None):
-    args = parser().parse_args(argv)
-    context = ctx or Context(args.root)
+def main(argv=None, ctx=None, human=False):
     try:
+        args = parser(human=human).parse_args(argv)
+        args.human = human or args.human or args.module == 'wizard'
+        context = ctx or Context(args.root)
         result = dispatch(context, args)
-        output(result)
+        output(result, human=args.human, args=args)
         if isinstance(result, dict) and (result.get('returncode', 0) != 0 or result.get('status') in ('failed', 'budget_exhausted', 'interrupted')):
             return 1
         return 0
-    except (Error, OSError, ValueError, KeyboardInterrupt) as exc:
+    except (Error, OSError, ValueError, KeyboardInterrupt, traffic.engine.Stop) as exc:
         print('失败: ' + str(exc), file=sys.stderr)
         return 1
