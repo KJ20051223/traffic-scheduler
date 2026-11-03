@@ -146,7 +146,8 @@ def defaults():
                         'link_mbps': None, 'reserve_mbps': 0, 'authorized_urls': [],
                         'region': 'cn', 'state_dir': '/var/lib/traffic-scheduler',
                         'times': [], 'window': ['00:00', '23:59'], 'paused': False,
-                        'hourly_weights': [1] * 24}}
+                        'hourly_weights': [1] * 24, 'strategy': 'quota', 'ratio': '1:2',
+                        'ratio_interface': 'auto', 'ratio_tolerance_pct': 5.0, 'ratio_schedule': 'follow'}}
 
 
 def configuration(ctx):

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import tarfile
 import zipfile
+from vps_toolkit import __version__
 
 source = Path(__file__).resolve().parent
 outputs = source.parent.parent / 'outputs'
@@ -58,9 +59,9 @@ with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as bundle:
             target.write_bytes(source.read())
 VPS_TOOLKIT_EXTRACT'''.format(payload=encoded, checksum=checksum)
 installer = (source / 'bootstrap.sh').read_text(encoding='utf-8').replace('__EMBEDDED_PAYLOAD__', extract)
-for path in (repo / 'install.sh', outputs / 'install-vps-toolkit-3.0.0.sh', outputs / 'install-vps-toolkit.sh'):
+for path in (repo / 'install.sh', outputs / ('install-vps-toolkit-' + __version__ + '.sh'), outputs / 'install-vps-toolkit.sh'):
     path.write_text(installer, encoding='utf-8', newline='\n')
-with zipfile.ZipFile(outputs / 'vps-toolkit-3.0.0.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+with zipfile.ZipFile(outputs / ('vps-toolkit-' + __version__ + '.zip'), 'w', zipfile.ZIP_DEFLATED) as archive:
     for path in repo.rglob('*'):
         if path.is_file() and '__pycache__' not in path.parts:
             archive.write(path, 'vps-toolkit/' + path.relative_to(repo).as_posix())

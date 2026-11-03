@@ -21,7 +21,7 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '3.0.0'
+VERSION = '3.1.0'
 PLAN_VERSION = 2
 PLAN_WORK_SECONDS = 40
 # Adjustable estimates, not measurements of real users or upload traffic.
@@ -218,6 +218,10 @@ def locked(directory):
     import fcntl
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'run.lock').open('a') as handle:
+        if os.name == 'posix' and os.geteuid() == 0:
+            owner = directory.stat()
+            os.fchown(handle.fileno(), owner.st_uid, owner.st_gid)
+            os.fchmod(handle.fileno(), 0o600)
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -596,6 +600,12 @@ def run_session(config, data, path, directory, network, metric='bytes', health=N
                      item['daily_bytes'] - data[direction][metric])
         if stop_at is not None:
             amount = min(amount, stop_at - data[direction][metric])
+        if toolkit_home():
+            # Both schedulers hold this same quota lock; never nest the lock here.
+            from vps_toolkit.traffic import legacy_allowance
+            amount = min(amount, legacy_allowance(config, data, directory))
+            if amount <= 0:
+                return True
         before = data[direction]['confirmed']
         try:
             transfer(network, direction, item, target, amount, directory, data, path, pacers[direction])
@@ -665,18 +675,20 @@ def tick(config, directory, rng=None):
         elif extend_plan(config, data, moment, rng):
             atomic_json(path, data)
         allowance = None
+        follow_ratio = False
         toolkit = toolkit_home()
         if toolkit:
             sys.path.insert(0, str(toolkit))
             try:
-                from vps_toolkit.traffic import legacy_allowance
+                from vps_toolkit.traffic import legacy_allowance, legacy_realtime
                 allowance = legacy_allowance(config, data, directory)
+                follow_ratio = legacy_realtime()
             except Exception as error:
                 raise ValueError('统一预算检查失败，停止下载: ' + str(error))
             if allowance <= 0:
                 return 0
         key = moment.hour * 60 + moment.minute
-        if data.get('last_tick') == key or not due(config, data, moment):
+        if data.get('last_tick') == key or (not follow_ratio and not due(config, data, moment)):
             return 0
         data['last_tick'] = key
         atomic_json(path, data)
@@ -688,7 +700,8 @@ def tick(config, directory, rng=None):
         network = Network(load_geo(directory))
         health = load_health(directory)
         item = config['directions']['download']
-        chunk_bytes = data['plan']['chunks'][str(key)]
+        chunk_bytes = (max(1, int(item['mbps'] * 125000 * PLAN_WORK_SECONDS)) if follow_ratio
+                       else data['plan']['chunks'][str(key)])
         if allowance is not None:
             chunk_bytes = min(chunk_bytes, allowance)
         log('执行下行：每日 {:g} GB，限速 {:g} Mbps，区域 {}；今日已计量 {:.6f} GB'.format(

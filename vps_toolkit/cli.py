@@ -77,6 +77,7 @@ def parser():
         q.add_argument('--mbps', type=float)
         q.add_argument('--max-runtime', type=int)
         q.add_argument('--sha256')
+        q.add_argument('--ignore-ratio', action='store_true', help='显式手动实测忽略比例缺口，仍遵守日/月预算')
     q = t.add_parser('authorize')
     q.add_argument('url')
     q.add_argument('--remove', action='store_true')
@@ -88,6 +89,14 @@ def parser():
     for flag in ('timezone', 'times', 'window', 'hourly-weights'):
         q.add_argument('--' + flag)
     q.add_argument('--region', choices=['cn', 'overseas'])
+    q.add_argument('--strategy', choices=['quota', 'ratio'])
+    q.add_argument('--ratio', help='上行:下行，例如 1:2')
+    q.add_argument('--ratio-interface', help='auto 或出口网卡名称，多个用逗号分隔')
+    q.add_argument('--ratio-schedule', choices=['follow', 'random'])
+    q.add_argument('--ratio-tolerance-pct', type=float)
+    q = t.add_parser('ratio-seed', help='补录当前累计上下行流量；不清零下载预算')
+    q.add_argument('--upload-gb', type=float, required=True)
+    q.add_argument('--download-gb', type=float, required=True)
     q = t.add_parser('enable')
     q.add_argument('--replace-legacy', action='store_true')
     backups = sub.add_parser('backup').add_subparsers(dest='action', required=True)
@@ -120,6 +129,8 @@ def download_child(ctx, args):
             value = getattr(args, key, None)
             if value is not None:
                 command += ['--' + key.replace('_', '-'), str(value)]
+        if getattr(args, 'ignore_ratio', False):
+            command.append('--ignore-ratio')
         return {'returncode': subprocess.call(command)}
     return None
 
@@ -176,7 +187,8 @@ def traffic_dispatch(ctx, args):
         if value is not None and (not math.isfinite(value) or value <= 0):
             raise Error('任务下载量必须是有限正数')
         return traffic.download(ctx, size=int(value) if value is not None else None, mbps=args.mbps,
-                                url=args.url, max_runtime=args.max_runtime, expected_sha256=args.sha256)
+                                url=args.url, max_runtime=args.max_runtime, expected_sha256=args.sha256,
+                                ignore_ratio=args.ignore_ratio)
     ctx.require_root()
     if action in ('pause', 'stop', 'resume'):
         traffic.set_control(ctx, action)
@@ -188,6 +200,12 @@ def traffic_dispatch(ctx, args):
         return {'action': action, 'note': '不操作 Realm；停止/暂停在当前有限大小请求结束后生效'}
     config = configuration(ctx)
     item = config['traffic']
+    if action == 'ratio-seed':
+        values = (args.upload_gb, args.download_gb)
+        if any(not math.isfinite(v) or v < 0 for v in values):
+            raise Error('累计 GB 须为有限非负数')
+        with traffic.engine.locked(ctx.path(item['state_dir'])):
+            return traffic.ratio.seed(ctx, item, int(values[0] * 1e9), int(values[1] * 1e9))
     if action == 'authorize':
         if args.remove:
             item['authorized_urls'] = [u for u in item['authorized_urls'] if u != args.url]
@@ -200,7 +218,8 @@ def traffic_dispatch(ctx, args):
                 if not math.isfinite(value) or value <= 0:
                     raise Error('流量预算须为有限正数')
                 item[name + '_bytes'] = int(value * 1e9)
-        for name in ('mbps', 'link_mbps', 'reserve_mbps', 'max_runtime', 'max_concurrency', 'region'):
+        for name in ('mbps', 'link_mbps', 'reserve_mbps', 'max_runtime', 'max_concurrency', 'region',
+                     'strategy', 'ratio', 'ratio_interface', 'ratio_schedule', 'ratio_tolerance_pct'):
             value = getattr(args, name)
             if value is not None:
                 item[name] = value
@@ -377,11 +396,19 @@ def menu(ctx):
             main(['traffic', 'authorize', url], ctx)
             commands[choice] = ['traffic', 'download', '--url', url, '--mb', input('下载 MB [10]: ').strip() or '10']
         elif choice == '10':
-            operation = input('status / enable / disable / pause / resume / stop / configure: ').strip()
+            operation = input('status / enable / disable / pause / resume / stop / configure / ratio / ratio-seed: ').strip()
             command = ['traffic', operation]
             if operation == 'configure':
                 command += ['--daily-gb', input('每日预算 GB: ').strip(), '--monthly-gb', input('每月预算 GB: ').strip(),
                             '--mbps', input('下载限速 Mbps: ').strip()]
+            elif operation == 'ratio':
+                command = ['traffic', 'configure', '--strategy', 'ratio',
+                           '--ratio', input('上行:下行 [1:2]: ').strip() or '1:2',
+                           '--ratio-interface', input('出口网卡 [auto]: ').strip() or 'auto',
+                           '--ratio-schedule', input('follow 实时补 / random 随机补 [follow]: ').strip() or 'follow']
+            elif operation == 'ratio-seed':
+                command += ['--upload-gb', input('当前全部累计上行 GB: ').strip(),
+                            '--download-gb', input('当前全部累计下行 GB: ').strip()]
             commands[choice] = command
         elif choice == '15':
             commands[choice] = ['backup', 'restore', input('备份路径: ').strip(), '--apply']

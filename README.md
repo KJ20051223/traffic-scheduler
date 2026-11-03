@@ -1,6 +1,6 @@
 # VPS Toolkit
 
-Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.0.0**。
+Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.1.0**。
 
 **升级保留已有下载任务的启停状态、原配置、当日统计与运行中的 Realm；新自动下载任务默认关闭。** 不修改 SSH、防火墙、安全组、系统 Python 或 libc，不新增网站、TLS 监听或远程管理端口。HTTPS 仅作为下载客户端使用。
 
@@ -80,6 +80,61 @@ sudo vps-toolkit traffic disable
 ```
 
 预留通过限制本工具下载速率实现，不是系统 QoS；不会修改 tc/防火墙或保证外部程序带宽。实际下载并发恒为 **1**，`--max-concurrency` 只设上限，不会启动多个抢占共享预算的下载。默认每任务 100 MB、最长 300 秒、每日 20 GB、每月 600 GB、5 Mbps。低速、窄窗口、资源故障或大额度可能导致当日无法完成，预算是上限，不是完成承诺。
+
+## 按整机累计上行:下行比例补下载（3.1.0）
+
+读取出口网卡的全部 TX/RX，包括业务、转发和本工具产生的流量；按**累计上行:累计下行**计算，仅在下行不足时补下载。默认示例 `1:2`：累计上传 5 GB、下载 6 GB，目标下行 10 GB，最多还需补约 4 GB；已有下行足够就停止，不会为了固定每日额度继续下载。累计计量**不按日、月清零**，不会主动上传。
+
+升级后明确切换策略，原额度、限速、地区、授权资源和任务启停状态保留：
+
+```sh
+sudo vps-toolkit traffic configure --strategy ratio --ratio 1:2 --ratio-schedule follow --ratio-interface auto
+sudo vps-toolkit traffic status
+# 已有任务仍会运行；若之前没有启用任何任务：
+sudo vps-toolkit traffic enable
+# 若想把仍启用的旧 traffic-scheduler 明确迁移到新调度器：
+sudo vps-toolkit traffic enable --replace-legacy
+```
+
+`follow` 每分钟复核一次，有缺口才按约 40 秒工作量小块补下行，下载期间每块（不超过 2 MiB/约 8 秒限速工作量）重新读取计数；外部业务补足下行后，当前有限大小请求结束便停止。默认容差 5%，不足 1 MB 不启动，避免围绕目标不断发起微小请求。目标变化、并发业务、内核统计延迟和协议开销意味着比例是近似值；若下行已经过多，只能等待后续上行增长，无法把已有流量减掉。
+
+```sh
+# 比例可修改；10 Mbps 仍是峰值上限，日/月预算仍作为补下载上限
+sudo vps-toolkit traffic configure --ratio 1:3 --mbps 10 --daily-gb 30 --monthly-gb 900
+sudo vps-toolkit traffic configure --ratio-tolerance-pct 2
+# 想保留原全天随机/作息权重分散补流，使用 random（跟随会更慢）
+sudo vps-toolkit traffic configure --ratio-schedule random --times '' --window 00:00-23:59
+# 实时跟随、全天允许检查（清除之前设置的固定时刻）
+sudo vps-toolkit traffic configure --ratio-schedule follow --times '' --window 00:00-23:59
+# 退出比例模式，恢复原固定额度随机调度
+sudo vps-toolkit traffic configure --strategy quota
+```
+
+日/月预算仅统计本工具有效负载，整机比例使用网卡计数，二者用途不同。缺口大于剩余预算或上传增长超过补下载能力时，本工具会保持限速与预算，无法保证达到目标。`traffic status` 的 `machine_traffic` 显示累计上下行、目标、缺口、接口和历史完整性提示。兼容旧定时入口也执行比例上限；`follow` 时按分钟检查，不再等待旧随机时段，但旧入口自己的额度上限仍生效。要统一时间窗口等新调度设置，请显式迁移到新入口。
+
+### 首次历史接入、重启与网卡选择
+
+首次使用读取**本次开机以来的网卡累计值**，以后将增量持久保存到 `/var/lib/vps-toolkit/traffic/machine-meter.json`。跨日/月不归零，重启或网卡计数器重置后保留已记录总量并累加新计数；重启前最后一次采样后的遗漏字节无法恢复，会显示提示。安装前更早的重启历史无法凭空恢复。有可靠的历史总量时，可显式补录**此刻的累计总量**（不是要增加的差值）：
+
+```sh
+# 例如实际累计上行 50 GB、累计下行 80 GB：
+sudo vps-toolkit traffic ratio-seed --upload-gb 50 --download-gb 80
+sudo vps-toolkit traffic status
+```
+
+校准会重设整机计量基线，保留一份上次记录；**不清零本工具日/月已用额度**。`auto` 首次选择最低 metric 的默认 IPv4 出口（IPv6-only 时使用 IPv6 出口），此后固定该接口，避免把 lo、docker/veth、桥接和物理网卡重复相加。多出口请自行指定需要合计的公网接口；不要同时选桥接/隧道和其承载网卡：
+
+```sh
+ip -br link
+sudo vps-toolkit traffic configure --ratio-interface eth0
+# 更换已计量的接口时，必须校准当前累计总量，再继续下载
+sudo vps-toolkit traffic ratio-seed --upload-gb 50 --download-gb 80
+# 确有两个独立公网出口时，可 --ratio-interface eth0,eth1
+```
+
+计数来自 Linux [`/proc/net/dev` 接口统计](https://docs.kernel.org/networking/statistics.html)，可能包含内网数据和协议开销，**不等同于云厂商计费账单**。云账单使用其他周期时应以其实际规则核对，工具无法保证账单比例。备份恢复不会回滚本机累计计量文件；迁移到另一台机器应重新校准。
+
+手动下载功能保留，默认也遵守比例缺口；已足够时返回 `ratio_satisfied`。确实需要额外手动实测，可明确指定 `traffic test --mb 10 --ignore-ratio`，仍受日/月/任务预算约束，内容照常自动清理。兼容旧入口的显式 `test` 也保留真实测试语义，会产生额外下行。
 
 ## PF / Realm
 

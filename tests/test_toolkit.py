@@ -120,6 +120,76 @@ class ToolkitTests(unittest.TestCase):
         state = traffic.status(self.ctx, self.at)
         self.assertEqual(state['today_bytes'], 3_000_017)
         self.assertFalse(list(self.ctx.path('/var/lib/traffic-scheduler').glob('payload-*')))
+
+    def test_ratio_download_stops_after_business_download_eliminates_deficit(self):
+        self.cfg['traffic']['strategy'] = 'ratio'
+        save_config(self.ctx, self.cfg)
+        # First chunk is allowed; another application then fills the deficit.
+        with patch.object(traffic.ratio, 'sample', side_effect=[{'needed_bytes': 4_000_000},
+                         {'needed_bytes': 0}, {'needed_bytes': 0}]):
+            job = self.download(size=4_000_000)
+        self.assertEqual(job['status'], 'ratio_satisfied')
+        self.assertEqual(job['received_bytes'], 2_097_152)
+        self.assertEqual(len(Handler.ranges), 1)
+        record = read_json(self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-03.json'))
+        self.assertEqual(record['download']['bytes'], job['received_bytes'])
+
+    def test_ratio_already_satisfied_makes_no_request_and_manual_override_is_explicit(self):
+        self.cfg['traffic'].update(strategy='ratio', daily_bytes=100, monthly_bytes=100)
+        save_config(self.ctx, self.cfg)
+        with patch.object(traffic.ratio, 'sample', return_value={'needed_bytes': 0}):
+            self.assertEqual(self.download(size=50)['status'], 'ratio_satisfied')
+            self.assertEqual(Handler.ranges, [])
+            result = self.download(size=101, ignore_ratio=True)
+            self.assertEqual(result['status'], 'budget_exhausted')
+            self.assertEqual(result['received_bytes'], 100)
+
+    def test_real_transfer_machine_meter_stops_at_lifetime_deficit_without_double_count(self):
+        self.cfg['traffic'].update(strategy='ratio', ratio_tolerance_pct=0)
+        save_config(self.ctx, self.cfg)
+        quota = self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-03.json')
+        def snapshot(context, selected):
+            record = read_json(quota, {'download': {'bytes': 0}})
+            return {'boot': 'fixture', 'interfaces': {'eth0': {'tx': 2_000_000,
+                    'rx': record['download']['bytes'], 'index': 2}}}
+        with patch.object(traffic.ratio, 'auto_interfaces', return_value=['eth0']), patch.object(traffic.ratio, 'snapshot', side_effect=snapshot):
+            job = self.download(size=5_000_000)
+            state = traffic.status(self.ctx, self.at)
+        self.assertEqual(job['status'], 'ratio_satisfied')
+        self.assertEqual(job['received_bytes'], 4_000_000)
+        self.assertEqual(state['machine_traffic']['download_bytes'], 4_000_000)
+        self.assertEqual(state['machine_traffic']['needed_bytes'], 0)
+        self.assertEqual(state['today_bytes'], 4_000_000)
+        self.assertEqual(Handler.ranges, [(0, 2_097_151), (2_097_152, 3_999_999)])
+
+    def test_ratio_follow_tick_only_when_needed_and_honors_window_budget_and_once_per_minute(self):
+        self.cfg['traffic'].update(strategy='ratio', enabled=True, daily_bytes=3_000_000,
+                                   monthly_bytes=10_000_000, window=['10:00', '20:00'])
+        save_config(self.ctx, self.cfg)
+        with patch.object(traffic.ratio, 'sample', return_value={'needed_bytes': 0}), patch.object(traffic, 'download') as transfer:
+            self.assertEqual(traffic.tick(self.ctx, self.at)['reason'], 'ratio_satisfied')
+            transfer.assert_not_called()
+        with patch.object(traffic.ratio, 'sample', return_value={'needed_bytes': 4_000_000}), patch.object(traffic, 'download') as transfer:
+            traffic.tick(self.ctx, self.at)
+            self.assertEqual(transfer.call_args.kwargs['size'], 3_000_000)
+            self.assertTrue(traffic.tick(self.ctx, self.at)['skipped'])
+            self.assertTrue(traffic.tick(self.ctx, self.at.replace(hour=23))['skipped'])
+            self.assertEqual(transfer.call_count, 1)
+
+    def test_ratio_cli_configure_preserves_existing_state_and_seed_does_not_refund_budget(self):
+        with patch('sys.stdout', new=io.StringIO()):
+            self.assertEqual(main(['traffic', 'configure', '--strategy', 'ratio', '--ratio', '1:3'], self.ctx), 0)
+        saved = read_json(self.ctx.config_path)['traffic']
+        self.assertFalse(saved['enabled'])
+        self.assertEqual(saved['daily_bytes'], self.cfg['traffic']['daily_bytes'])
+        self.assertEqual(saved['ratio'], '1:3')
+        directory, path, data, _ = traffic.ledger(self.ctx, saved, self.at)
+        data['download']['bytes'] = 12345
+        write_json(path, data)
+        with patch.object(traffic.ratio, 'seed', return_value={'fixture': True}) as seed, patch('sys.stdout', new=io.StringIO()):
+            self.assertEqual(main(['traffic', 'ratio-seed', '--upload-gb', '5', '--download-gb', '6'], self.ctx), 0)
+        self.assertEqual(seed.call_args.args[2:], (5_000_000_000, 6_000_000_000))
+        self.assertEqual(read_json(path)['download']['bytes'], 12345)
     def test_daily_and_monthly_budgets_include_legacy_downloads(self):
         self.cfg['traffic'].update(daily_bytes=50, monthly_bytes=60)
         save_config(self.ctx, self.cfg)
@@ -153,6 +223,13 @@ class ToolkitTests(unittest.TestCase):
         with patch.object(traffic, 'Context', return_value=self.ctx), patch.object(traffic, 'configuration', side_effect=fixture_configuration):
             self.assertEqual(traffic.legacy_allowance(old, data, directory), 63)
             self.assertEqual(old['directions']['download']['mbps'], 2)
+            self.cfg['traffic']['strategy'] = 'ratio'
+            save_config(self.ctx, self.cfg)
+            with patch.object(traffic.ratio, 'sample', return_value={'needed_bytes': 17}):
+                self.assertEqual(traffic.legacy_allowance(old, data, directory), 17)
+                self.assertTrue(traffic.legacy_realtime())
+            with patch.object(traffic.ratio, 'sample', return_value={'needed_bytes': 0}):
+                self.assertEqual(traffic.legacy_allowance(old, data, directory), 0)
             self.cfg['traffic']['paused'] = True
             save_config(self.ctx, self.cfg)
             self.assertEqual(traffic.legacy_allowance(old, data, directory), 0)

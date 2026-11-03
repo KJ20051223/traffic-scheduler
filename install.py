@@ -12,6 +12,7 @@ import tempfile
 from vps_toolkit.core import Context, Error, atomic, configuration, digest, save_config, write_json
 from vps_toolkit.platform import detect
 from vps_toolkit.traffic import import_legacy
+from vps_toolkit import __version__
 
 
 SOURCE = Path(__file__).resolve().parent
@@ -32,7 +33,7 @@ def install(ctx, python=sys.executable, no_wizard=False):
     if current.exists() and not current.is_symlink():
         raise Error('/opt/vps-toolkit/current 不是本工具符号链接，拒绝覆盖')
     release_hash = hashlib.sha256((SOURCE / 'MANIFEST.json').read_bytes()).hexdigest()[:16]
-    release = target / 'releases' / ('3.0.0-' + release_hash)
+    release = target / 'releases' / (__version__ + '-' + release_hash)
     old_target = os.readlink(str(current)) if current.is_symlink() else None
     owned = ctx.path('/usr/local/bin/vps-toolkit')
     if owned.exists() and 'VPS_TOOLKIT_MANAGED' not in owned.read_text(errors='replace')[:300]:
@@ -107,7 +108,7 @@ def install(ctx, python=sys.executable, no_wizard=False):
         os.replace(str(pending), str(current))
         if info['init'] == 'systemd':
             ctx.execute(['systemctl', 'daemon-reload'], check=True)
-        write_json(ctx.state / 'installation.json', {'version': '3.0.0', 'release': str(release),
+        write_json(ctx.state / 'installation.json', {'version': __version__, 'release': str(release),
                     'previous_release': old_target, 'legacy_tasks_preserved': True})
     except Exception:
         for path, value in previous.items():

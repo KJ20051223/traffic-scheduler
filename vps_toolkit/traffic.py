@@ -10,6 +10,7 @@ import uuid
 from urllib.parse import urlsplit
 from compat import traffic_scheduler as engine
 from .core import Context, Error, configuration, read_json, write_json
+from . import ratio
 
 
 def moment(timezone='system', timestamp=None):
@@ -41,6 +42,7 @@ def moment(timezone='system', timestamp=None):
 
 
 def validate(item):
+    ratio.validate(item)
     for field in ('daily_bytes', 'monthly_bytes', 'task_bytes', 'max_runtime', 'max_concurrency'):
         if type(item.get(field)) is not int or item[field] <= 0:
             raise Error(field + ' 必须是正整数')
@@ -119,7 +121,12 @@ def legacy_allowance(config, data, directory):
     config['directions']['download']['mbps'] = min(config['directions']['download']['mbps'], effective_rate(item))
     if any(target['url'] not in item['authorized_urls'] for target in engine.targets(config, 'download')):
         raise Error('原任务包含未授权的 URL，请先 traffic authorize')
-    return remaining(item, directory, data)
+    return min(remaining(item, directory, data), ratio.allowance(Context(), item))
+
+
+def legacy_realtime():
+    item = validate(configuration(Context())['traffic'])
+    return item['strategy'] == 'ratio' and item['ratio_schedule'] == 'follow'
 
 
 def import_legacy(ctx):
@@ -141,11 +148,11 @@ def legacy_test(config, directory, megabytes):
     if Path(settings['state_dir']).resolve() != Path(directory).resolve():
         raise Error('旧测试目录与统一预算不一致')
     url = engine.targets(config, 'download')[0]['url']
-    result = download(context, size=int(megabytes * 1e6), url=url)
+    result = download(context, size=int(megabytes * 1e6), url=url, ignore_ratio=True)
     if result['status'] != 'completed':
         raise Error('手动测试未完整完成，当前配置未获得启用许可')
     engine.atomic_json(Path(directory) / 'last-test.json', {
-        'at': moment(settings['timezone']).isoformat(), 'version': 'vps-toolkit-3.0.0',
+        'at': moment(settings['timezone']).isoformat(), 'version': 'vps-toolkit-3.1.0',
         'download': {'bytes': result['received_bytes'], 'confirmed': result['received_bytes'], 'reserved': 0},
         'config_hash': hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()})
 
@@ -156,17 +163,23 @@ def task_directory(ctx):
 
 def status(ctx, at=None):
     item = validate(configuration(ctx)['traffic'])
-    directory, path, data, at = ledger(ctx, item, at)
-    month_remaining = remaining(dict(item, daily_bytes=10**30), directory, data)
+    with engine.locked(ctx.path(item['state_dir'])):
+        directory, path, data, at = ledger(ctx, item, at)
+        month_remaining = remaining(dict(item, daily_bytes=10**30), directory, data)
+        machine = ratio.sample(ctx, item) if item['strategy'] == 'ratio' else None
+        if machine is not None:
+            machine['fillable_now_bytes'] = min(machine['needed_bytes'], remaining(item, directory, data))
+            machine['limited_by_budget'] = machine['needed_bytes'] > machine['fillable_now_bytes']
     jobs = [read_json(p) for p in sorted((task_directory(ctx) / 'jobs').glob('*.json'))[-30:]]
     return dict(time=at.isoformat(), settings=item, today_bytes=data['download']['bytes'],
                 monthly_remaining=month_remaining, remaining_bytes=remaining(item, directory, data), jobs=jobs,
+                machine_traffic=machine,
                 legacy_timer_preserved=ctx.path('/etc/systemd/system/traffic-scheduler.timer').exists(),
                 note='仅统计有效负载；协议开销另计。所有工具下载共用计量锁；实际并发为 1。')
 
 
 def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha256=None,
-             network=None, at=None, job_id=None):
+             network=None, at=None, job_id=None, ignore_ratio=False):
     item = validate(configuration(ctx)['traffic'])
     if item['paused']:
         raise Error('下载已暂停，请先 traffic resume')
@@ -203,7 +216,7 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
     else:
         offset = 0
         job = dict(id=identifier, url=url, requested_bytes=amount, received_bytes=0, status='running',
-                   started=moment(item['timezone']).isoformat(), sha256=expected_sha256)
+                   started=moment(item['timezone']).isoformat(), sha256=expected_sha256, ignore_ratio=ignore_ratio)
     hasher = hashlib.sha256() if expected_sha256 else None
     with engine.locked(directory):
         directory, path, data, current = ledger(ctx, item, at)
@@ -233,6 +246,11 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
                     if budget <= 0:
                         job['status'] = 'budget_exhausted'
                         break
+                    if not ignore_ratio:
+                        budget = min(budget, ratio.allowance(ctx, item))
+                        if budget <= 0:
+                            job['status'] = 'ratio_satisfied'
+                            break
                     piece = min(engine.PIECE, amount - offset, budget, max(1, int(rate * 125000 * 8)))
                     before = data['download']['bytes']
                     try:
@@ -269,6 +287,8 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
             if active.exists():
                 active.unlink()
             engine.atomic_json(directory / 'geo.json', network.cache if hasattr(network, 'cache') else {})
+            if item['strategy'] == 'ratio':
+                ratio.sample(ctx, item)
         return job
 
 
@@ -287,11 +307,12 @@ def set_control(ctx, action):
 
 def tick(ctx, at=None):
     item = validate(configuration(ctx)['traffic'])
-    if not item['enabled'] or item['paused']:
-        return {'skipped': True}
     at = at or moment(item['timezone'])
     directory = ctx.path(item['state_dir'])
     with engine.locked(directory):
+        machine = ratio.sample(ctx, item) if item['strategy'] == 'ratio' else None
+        if not item['enabled'] or item['paused']:
+            return {'skipped': True}
         directory, path, data, _ = ledger(ctx, item, at)
         minute = at.hour * 60 + at.minute
         config_hash = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
@@ -300,39 +321,62 @@ def tick(ctx, at=None):
         room = remaining(item, directory, data)
         if not room:
             return {'skipped': True, 'reason': 'budget'}
-        legacy = engine.default_config()
-        legacy['directions']['download'].update(daily_bytes=data['download']['bytes'] + room, mbps=effective_rate(item))
-        legacy['hourly_weights'] = item['hourly_weights']
-        if not plan or plan.get('settings_hash') != config_hash:
-            data['plan'] = None
-            generated = engine.make_plan(legacy, data, at)
+        if machine is not None:
+            room = min(room, machine['needed_bytes'])
+            if not room:
+                return {'skipped': True, 'reason': 'ratio_satisfied', 'machine_traffic': machine}
+        follow = machine is not None and item['ratio_schedule'] == 'follow'
+        if follow:
             start, end = [int(v[:2]) * 60 + int(v[3:]) for v in item['window']]
-            candidates = [n for n in range(max(minute, generated['not_before']), 1440)
-                          if (start <= n <= end if start <= end else n >= start or n <= end)]
-            needed = math.ceil(room / min(item['task_bytes'], effective_rate(item) * 125000 * 40))
-            candidates = sorted(engine.weighted_minutes(legacy, candidates, min(len(candidates), needed), engine.random.SystemRandom()))
-            if item['times']:
-                candidates = sorted({int(t[:2]) * 60 + int(t[3:]) for t in item['times']
-                                     if int(t[:2]) * 60 + int(t[3:]) >= minute})
-            plan = {'settings_hash': config_hash, 'minutes': candidates, 'last_tick': None,
-                    'not_before': generated['not_before'] if not item['times'] else 0}
-            write_json(plan_path, plan)
-        elif not item['times']:
-            start, end = [int(v[:2]) * 60 + int(v[3:]) for v in item['window']]
-            available = {n for n in range(max(minute, plan['not_before']), 1440)
-                         if (start <= n <= end if start <= end else n >= start or n <= end)}
-            planned = set(plan['minutes'])
-            needed = min(len(available), math.ceil(room / min(item['task_bytes'], effective_rate(item) * 125000 * 40)))
-            extra = needed - len(planned & available)
-            if extra > 0:
-                planned.update(engine.weighted_minutes(legacy, sorted(available - planned), extra, engine.random.SystemRandom()))
-                plan['minutes'] = sorted(planned)
-                write_json(plan_path, plan)
-        if minute not in plan['minutes'] or plan['last_tick'] == minute:
-            return {'skipped': True}
-        future = sum(n >= minute for n in plan['minutes'])
-        size = min(item['task_bytes'], math.ceil(room / max(1, future)))
-        plan['last_tick'] = minute
-        write_json(plan_path, plan)
-    # Release planning lock; download takes the SAME shared lock. Losing this race skips safely.
+            inside = start <= minute <= end if start <= end else minute >= start or minute <= end
+            fixed = {int(t[:2]) * 60 + int(t[3:]) for t in item['times']}
+            plan = read_json(plan_path, {})
+            if not inside or (fixed and minute not in fixed) or plan.get('last_follow') == minute:
+                return {'skipped': True, 'reason': 'window_or_already_checked'}
+            size = min(room, item['task_bytes'], max(1, int(effective_rate(item) * 125000 * 40)))
+            write_json(plan_path, {'last_follow': minute})
+        else:
+            size = plan_random(ctx, item, at, directory, data, room, plan_path, plan, config_hash)
+            if size is None:
+                return {'skipped': True}
+    # Release planning lock; transfer rechecks both shared budgets and actual NIC traffic.
     return download(ctx, size=size, max_runtime=min(48, item['max_runtime']), at=at)
+
+
+def plan_random(ctx, item, at, directory, data, room, plan_path, plan, config_hash):
+    minute = at.hour * 60 + at.minute
+    legacy = engine.default_config()
+    legacy['directions']['download'].update(daily_bytes=data['download']['bytes'] + room, mbps=effective_rate(item))
+    legacy['hourly_weights'] = item['hourly_weights']
+    if not plan or plan.get('settings_hash') != config_hash:
+        data['plan'] = None
+        generated = engine.make_plan(legacy, data, at)
+        start, end = [int(v[:2]) * 60 + int(v[3:]) for v in item['window']]
+        candidates = [n for n in range(max(minute, generated['not_before']), 1440)
+                      if (start <= n <= end if start <= end else n >= start or n <= end)]
+        needed = math.ceil(room / min(item['task_bytes'], effective_rate(item) * 125000 * 40))
+        candidates = sorted(engine.weighted_minutes(legacy, candidates, min(len(candidates), needed), engine.random.SystemRandom()))
+        if item['times']:
+            candidates = sorted({int(t[:2]) * 60 + int(t[3:]) for t in item['times']
+                                 if int(t[:2]) * 60 + int(t[3:]) >= minute})
+        plan = {'settings_hash': config_hash, 'minutes': candidates, 'last_tick': None,
+                'not_before': generated['not_before'] if not item['times'] else 0}
+        write_json(plan_path, plan)
+    elif not item['times']:
+        start, end = [int(v[:2]) * 60 + int(v[3:]) for v in item['window']]
+        available = {n for n in range(max(minute, plan['not_before']), 1440)
+                     if (start <= n <= end if start <= end else n >= start or n <= end)}
+        planned = set(plan['minutes'])
+        needed = min(len(available), math.ceil(room / min(item['task_bytes'], effective_rate(item) * 125000 * 40)))
+        extra = needed - len(planned & available)
+        if extra > 0:
+            planned.update(engine.weighted_minutes(legacy, sorted(available - planned), extra, engine.random.SystemRandom()))
+            plan['minutes'] = sorted(planned)
+            write_json(plan_path, plan)
+    if minute not in plan['minutes'] or plan['last_tick'] == minute:
+        return None
+    future = sum(n >= minute for n in plan['minutes'])
+    size = min(item['task_bytes'], math.ceil(room / max(1, future)))
+    plan['last_tick'] = minute
+    write_json(plan_path, plan)
+    return size
