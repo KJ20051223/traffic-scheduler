@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: python3 -m unittest -v tests.test_toolkit tests.test_ratio tests.test_menu compat.test_traffic_scheduler
+      - run: python3 -m unittest -v tests.test_toolkit tests.test_ratio tests.test_menu tests.test_agent_batch tests.test_progress compat.test_traffic_scheduler
       - run: sh -n install.sh && sh -n services/vps-toolkit-traffic.openrc
   platforms:
     runs-on: ubuntu-24.04

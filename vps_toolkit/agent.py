@@ -9,7 +9,7 @@ from .platform import detect
 
 
 ALI_SECURITY = 'https://www.alibabacloud.com/help/zh/security-center/uninstall-the-security-center-agent'
-ALI_ASSIST = 'https://help.aliyun.com/zh/ecs/user-guide/install-cloud-assistant-agent'
+ALI_ASSIST = 'https://help.aliyun.com/zh/ecs/user-guide/stop-and-uninstall-the-cloud-assistant-agent'
 ALI_MONITOR = 'https://help.aliyun.com/en/cms/cloudmonitor-1-0/user-guide/install-and-uninstall-the-cloudmonitor-agent-for-cpp'
 TAT_DOC = 'https://cloud.tencent.com/document/product/1340/46050'
 TC_MONITOR = 'https://intl.cloud.tencent.com/zh/document/product/248/39810'
@@ -17,8 +17,8 @@ TC_SECURITY = 'https://cloud.tencent.com/document/product/664/137804'
 
 
 CATALOG = {
-    'aliyun-assist': dict(provider='aliyun', names=['aliyun-service', 'AssistDaemon', 'aliyun-assist'],
-                          paths=['/usr/local/share/aliyun-assist', '/usr/local/aliyun-assist'], doc=ALI_ASSIST,
+    'aliyun-assist': dict(provider='aliyun', names=['aliyun-service', 'AssistDaemon', 'assist_daemon', 'aliyun-assist', 'aliyun.service'],
+                          paths=['/usr/local/share/aliyun-assist', '/usr/local/aliyun-assist', '/usr/local/share/assist-daemon'], doc=ALI_ASSIST,
                           uninstall=[]),
     'aegis': dict(provider='aliyun', names=['AliYunDun', 'AliYunDunMonitor', 'AliYunDunUpdate', 'AliSecCheck', 'aegis'],
                   paths=['/usr/local/aegis', '/opt/aegis'], doc=ALI_SECURITY, protected=True, uninstall=[]),
@@ -36,7 +36,7 @@ CATALOG = {
                     paths=['/usr/local/qcloud/stargate'], doc=TC_MONITOR,
                     uninstall=[('/usr/local/qcloud/stargate/admin/uninstall.sh', [])]),
     'yunjing': dict(provider='tencent', names=['YDService', 'YDLive', 'YDPython', 'YDGuard', 'YunJing'],
-                    paths=['/usr/local/qcloud/YunJing'], doc=TC_SECURITY, protected=True, uninstall=[]),
+                    paths=['/usr/local/qcloud/YunJing', '/var/lib/qcloud/YunJing'], doc=TC_SECURITY, protected=True, uninstall=[]),
     'cloud-init': dict(provider=None, names=['cloud-init', 'cloud-final', 'cloud-config', 'cloud-id'],
                        paths=['/etc/cloud', '/var/lib/cloud'],
                        doc='https://cloudinit.readthedocs.io/en/latest/howto/disable_cloud_init.html', uninstall=[])}
@@ -126,6 +126,10 @@ def trusted_local_script(path, expected):
     info = path.stat()
     if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise Error('官方卸载程序必须由 root 拥有且不可被其他用户写入')
+    for parent in set(path.parents) | set(path.resolve().parents):
+        metadata = parent.lstat() if parent.is_symlink() else parent.stat()
+        if metadata.st_uid != 0 or not parent.is_symlink() and metadata.st_mode & 0o022:
+            raise Error('卸载程序的上级目录必须由 root 控制且不可被其他用户替换')
     if not expected or digest(path) != expected.lower():
         raise Error('需提供通过可信渠道核实的官方卸载程序 SHA256；不会自行下载并执行未知脚本')
     if not path.read_bytes().lstrip().startswith(b'#!'):

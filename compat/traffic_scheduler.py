@@ -21,7 +21,7 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '3.2.0'
+VERSION = '3.3.0'
 PLAN_VERSION = 2
 PLAN_WORK_SECONDS = 40
 # Adjustable estimates, not measurements of real users or upload traffic.
@@ -455,7 +455,7 @@ def download_url(target, amount):
     return target['url']
 
 
-def transfer(network, direction, item, target, amount, directory, data, path, pacer, offset=0, hasher=None):
+def transfer(network, direction, item, target, amount, directory, data, path, pacer, offset=0, hasher=None, progress=None):
     if direction != 'download':
         raise ValueError('本版本仅支持下行下载')
     entry = data[direction]
@@ -464,6 +464,11 @@ def transfer(network, direction, item, target, amount, directory, data, path, pa
     actual = 0
     confirmed = False
     started = time.monotonic()
+    if progress is None and toolkit_home():
+        from vps_toolkit.progress import reporter
+        progress = reporter(directory, data, requested=amount)
+    if progress:
+        progress(0, 0)
     conn = response = None
     url = download_url(target, amount)
     try:
@@ -513,6 +518,8 @@ def transfer(network, direction, item, target, amount, directory, data, path, pa
                         hasher.update(chunk)
                     output.write(chunk)
                     pacer.wait(len(chunk))
+                    if progress:
+                        progress(actual, time.monotonic() - started)
             confirmed = True
             break
         else:
@@ -534,6 +541,8 @@ def transfer(network, direction, item, target, amount, directory, data, path, pa
             entry['observed_bps'] = previous * 0.5 + measured * 0.5
         entry['reserved'] = 0
         atomic_json(path, data)
+        if progress:
+            progress(actual, elapsed, final=True)
 
 
 def stop_signal(signum, frame):

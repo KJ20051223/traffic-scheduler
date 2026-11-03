@@ -50,6 +50,14 @@ def parser(human=False):
     q.add_argument('--confirm-network-independent', action='store_true')
     q.add_argument('--official-script')
     q.add_argument('--sha256')
+    q = agents.add_parser('remove-all', help='按清单一次确认，尽力卸载全部已检测 Agent')
+    q.add_argument('--scope', choices=['all', 'monitoring'], default='all')
+    q.add_argument('--keep-cloud-init', action='store_true')
+    q.add_argument('--dry-run', action='store_true')
+    q.add_argument('--confirm')
+    q.add_argument('--console-authorized', action='store_true')
+    q.add_argument('--confirm-network-independent', action='store_true')
+    agents.add_parser('removal-report')
     pf = sub.add_parser('pf').add_subparsers(dest='action', required=True)
     for name in ('install', 'repair'):
         q = pf.add_parser(name)
@@ -76,7 +84,7 @@ def parser(human=False):
         if name == 'import':
             q.add_argument('--apply', action='store_true')
     t = sub.add_parser('traffic').add_subparsers(dest='action', required=True)
-    for name in ('status', 'tick', 'pause', 'stop', 'disable'):
+    for name in ('status', 'progress', 'watch', 'tick', 'pause', 'stop', 'disable'):
         t.add_parser(name)
     q = t.add_parser('resume')
     q.add_argument('--job')
@@ -185,6 +193,12 @@ def enable_traffic(ctx, config, replace_legacy=False):
 
 def traffic_dispatch(ctx, args):
     action = args.action
+    if action in ('progress', 'watch'):
+        from . import progress
+        if action == 'progress':
+            return progress.snapshot(ctx)
+        progress.watch(ctx)
+        return None
     if action == 'status':
         return traffic.status(ctx)
     if action == 'resume' and args.job and os.name == 'posix' and os.geteuid() == 0:
@@ -281,6 +295,18 @@ def dispatch(ctx, args):
             save_config(ctx, config)
         return health.identify_cloud(ctx, configuration(ctx).get('cloud_override'))
     if args.module == 'agent':
+        if args.action == 'remove-all':
+            from . import agent_batch
+            plan = agent_batch.plan(ctx, scope=args.scope, include_cloud_init=not args.keep_cloud_init,
+                                    console_authorized=args.console_authorized,
+                                    network_independent=args.confirm_network_independent)
+            if args.dry_run:
+                return plan
+            if args.confirm is None:
+                output(plan, human=args.human, args=args)
+            return agent_batch.execute(ctx, plan, args.confirm)
+        if args.action == 'removal-report':
+            return read_json(ctx.state / 'agent-removal' / 'latest.json', {'note': '尚无批量卸载记录'})
         if args.action == 'remove':
             return agent.remove(ctx, args.component, dry_run=args.dry_run, confirmation=args.confirm,
                                 console_authorized=args.console_authorized, script=args.official_script,

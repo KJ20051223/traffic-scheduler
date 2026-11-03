@@ -15,6 +15,10 @@ STATES = {'completed': '已完成', 'running': '运行中', 'failed': '失败', 
           'ratio_satisfied': '比例已满足，无需继续下载', 'quota': '固定额度', 'ratio': '累计比例补下行',
           'follow': '按分钟跟随', 'random': '全天随机分散', 'cn': '中国大陆', 'overseas': '海外',
           'pause': '暂停下载', 'resume': '解除暂停', 'stop': '停止当前下载'}
+STATES.update({'ready': '可执行', 'blocked': '未满足执行条件', 'excluded': '未选择', 'not_detected': '未确认安装',
+               'removed': '已卸载', 'residual': '仍有残留/需复核', 'disabled_only': '仅禁用下次启动，未完全卸载',
+               'idle': '等待下次任务', 'connecting': '正在连接', 'receiving': '正在下载',
+               'between_requests': '分块已结算，准备下一块', 'not_run': '未执行'})
 LABELS = {'saved': '已保存至', 'exported': '已导出至', 'archive': '备份文件', 'files': '文件数量/列表',
           'output': '执行输出', 'returncode': '退出状态', 'note': '说明', 'reason': '原因', 'action': '操作',
           'version': '版本', 'installed': '当前版本', 'available': '可用版本', 'sha256': 'SHA256',
@@ -204,6 +208,65 @@ def rules(value):
             tree(extras, 4)
 
 
+def render_progress(value):
+    row('下载状态', value['status'])
+    row('入口', value['entry'])
+    if value.get('id'):
+        row('任务编号', value['id'])
+    if value.get('requested_bytes'):
+        percent = value.get('percent') or 0
+        filled = int(percent * 24 / 100)
+        row('当前任务进度', '[{}{}] {:.1f}%'.format('#' * filled, '-' * (24 - filled), percent))
+        row('已接收 / 本次目标', '{} / {}'.format(size(value['received_bytes']), size(value['requested_bytes'])))
+    row('当前有效负载速度', '{:.2f} Mbps'.format(value['speed_mbps']))
+    row('设置限速', '{} Mbps'.format(value['configured_mbps']))
+    if value.get('eta_seconds') is not None:
+        row('本次任务估计剩余', '{:.0f} 秒'.format(value['eta_seconds']))
+    section('今日下载')
+    row('今日已接收（含待结算）', size(value['today_bytes']))
+    row('今日已结算', size(value['today_settled_bytes']))
+    row('每日补下载上限', size(value['daily_limit_bytes']))
+    row('剩余额度', size(value['remaining_bytes']))
+    row('策略', value['strategy'])
+    row('下载已暂停', value['paused'])
+    if value.get('machine_traffic'):
+        section('整机累计比例')
+        tree(value['machine_traffic'])
+    row('说明', value['note'])
+
+
+def render_batch(value):
+    if value.get('batch_plan'):
+        row('本次范围', '全部云 Agent（含 cloud-init）' if value['scope'] == 'all' and value['include_cloud_init'] else '本次指定组件')
+        row('影响', value['impact'])
+        for item in value['entries']:
+            if item['status'] == 'not_detected':
+                continue
+            section(AGENTS.get(item['id'], item['id']) + ' · ' + scalar(item['status']))
+            if item['reason']:
+                row('说明', item['reason'])
+            if item.get('fallback_disable'):
+                row('卸载失败备选', '使用 cloud-init 官方标记禁用下次启动；会明确报告仅禁用')
+            for step in item['steps']:
+                row('将执行', ' '.join(step['argv']) if step.get('argv') else
+                    '清理云助手官方指定目录' if step['kind'] == 'cleanup_assist' else '创建 cloud-init 官方禁用标记')
+                if step.get('sha256'):
+                    row('确认后变更校验 SHA256', step['sha256'])
+            row('官方文档', item['official_document'])
+        row('说明', value['note'])
+    else:
+        for item in value['results']:
+            if item['status'] == 'not_detected':
+                continue
+            section(AGENTS.get(item['id'], item['id']) + ' · ' + scalar(item['status']))
+            if item.get('reason'):
+                row('说明', item['reason'])
+            if item.get('output'):
+                section('官方程序输出', item['output'])
+        row('完整报告', value['report_file'])
+        row('总体结果', '已完成本次可确认的卸载' if value['returncode'] == 0 else '部分项目未完成，请查看上方原因')
+
+
 def render(value, args=None):
     if value is None:
         return
@@ -211,7 +274,11 @@ def render(value, args=None):
         tree(value)
         return
     module = getattr(args, 'module', None)
-    if 'platform' in value and 'cloud' in value:
+    if value.get('progress_view'):
+        render_progress(value)
+    elif value.get('batch_plan') or value.get('batch_result'):
+        render_batch(value)
+    elif 'platform' in value and 'cloud' in value:
         health(value, module)
     elif 'provider' in value:
         cloud(value)

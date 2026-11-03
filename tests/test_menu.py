@@ -63,9 +63,10 @@ class MenuTests(unittest.TestCase):
         self.assertIn('目标上行:下行：1:3', self.out.getvalue())
 
     def test_busy_or_failed_action_waits_on_result_page_instead_of_crashing(self):
-        with patch.object(cli.traffic, 'status', side_effect=cli.traffic.engine.Stop('已有任务正在运行')):
+        from vps_toolkit import progress
+        with patch.object(progress, 'snapshot', side_effect=cli.Error('已有任务正在运行')):
             self.assertEqual(self.interact(['11', '0', '0']), 0)
-        self.assertIn('已有任务正在运行', self.err.getvalue())
+        self.assertIn('已有任务正在运行', self.err.getvalue() + self.out.getvalue())
         waits = [text for prompt, text in self.snapshots if '输入 0 返回' in prompt]
         self.assertEqual(len(waits), 1)
         self.assertEqual(waits[0].count('/  主菜单'), 1)
@@ -99,6 +100,13 @@ class MenuTests(unittest.TestCase):
         with patch('sys.stdout', io.StringIO()) as out:
             menu.screen('测试结果')
         self.assertNotIn('\033', out.getvalue())
+
+    def test_scheduler_progress_option_returns_with_one_zero(self):
+        from vps_toolkit import progress
+        with patch.object(progress, 'watch', return_value=False) as watch:
+            self.assertEqual(self.interact(['10', '14', '0', '0']), 0)
+        watch.assert_called_once_with(self.ctx)
+        self.assertIn('实时下载进度', self.out.getvalue())
 
     def test_plain_language_reports_keep_agent_limitations_ratio_and_rules(self):
         out = io.StringIO()

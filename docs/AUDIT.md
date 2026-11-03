@@ -16,13 +16,19 @@
 
 | 组件 | 官方依据 | 执行要求 |
 |---|---|---|
-| 阿里云云助手 | [安装管理文档](https://help.aliyun.com/zh/ecs/user-guide/install-cloud-assistant-agent) | 用户取得并核实官方卸载程序，不猜测删除命令 |
+| 阿里云云助手 | [停止卸载文档](https://help.aliyun.com/zh/ecs/user-guide/stop-and-uninstall-the-cloud-assistant-agent) | 包依赖检查、官方守护程序参数与精确组件目录清理；先确认独立 SSH/VNC |
 | 阿里云安全中心 | [官方卸载流程](https://www.alibabacloud.com/help/zh/security-center/uninstall-the-security-center-agent) | 控制台自保护/卸载授权；官方程序与可信 SHA256 |
 | 阿里云云监控 | [C++ Agent 安装卸载](https://help.aliyun.com/en/cms/cloudmonitor-1-0/user-guide/install-and-uninstall-the-cloudmonitor-agent-for-cpp) | 已安装 cloudmonitorCtl.sh uninstall，或 legacy wrapper remove，仍需摘要核实 |
 | 腾讯 Barad / Sgagent | [监控 Agent](https://intl.cloud.tencent.com/zh/document/product/248/39810) | 两个组件独立，执行各自 admin/uninstall.sh |
 | 腾讯 TAT | [官方 TAT 卸载脚本](https://github.com/Tencent/tat-agent/blob/main/install/uninstall.sh) | 可信固定版本脚本+摘要，不直接执行 main 在线脚本 |
 | 腾讯主机安全 | [卸载流程](https://cloud.tencent.com/document/product/664/137804) | 按控制台授权/验证码流程，禁止防护绕过 |
 | cloud-init | [官方禁用说明](https://cloudinit.readthedocs.io/en/latest/howto/disable_cloud_init.html) | 本工具默认审计；移除须额外核实发行版依赖与网络持久化 |
+
+3.3.0 批量卸载按用户选择默认包含 cloud-init，单项模式保持原有要求。批量仅接受已检测的确切组件，先展示计划并一次确认，不扩展到确认后新出现的组件。已安装程序的 root 所有权、不可替换的父目录、计划 SHA256 和执行前复核共同限制本地卸载入口；自动计算的哈希只防确认后改动，不构成厂商签名认证。
+
+内置 TAT 原始卸载脚本来自官方仓库 [固定提交 3c448fe4](https://github.com/Tencent/tat-agent/blob/3c448fe41fa502d0d3294181d37018380235c6be/install/uninstall.sh)，载荷 `vps_toolkit/assets/tat-uninstall.sh`，SHA256 `f63d2b8fc0c79aa5c612c30bc03360c2c3a7b2f4d205eb7548acb3182a9bae58`；同提交 LICENSE 存于 `vps_toolkit/assets/TAT-LICENSE`，安装器 MANIFEST 同时核对这两个文件。脚本仅移除 TAT 的服务、PID、链接和安装目录；只有管理员确认批次后才执行。开发/CI 不执行该真实脚本卸载本机组件。
+
+追加依据：[腾讯主机安全官方卸载路径](https://intl.cloud.tencent.com/ind/document/product/296/12236)、[腾讯安全客户端自保护流程](https://cloud.tencent.com/document/product/664/137804)、[阿里云安全中心卸载要求](https://help.aliyun.com/zh/security-center/uninstall-the-security-center-agent)。验证码和自保护均保留官方流程；缺少验证程序的阿里安全组件报告未完成。cloud-init 失败备选为官方 `cloud-init.disabled` 标记，仅禁用下次启动，不宣称完成卸载。
 
 只读探测不访问元数据凭证。报告不导出进程命令行、云密钥、token 或用户数据。未检测到已知进程不能推出没有其他监控，也不表示控制平面停止采集。
 

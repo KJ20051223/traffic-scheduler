@@ -1,6 +1,6 @@
 # VPS Toolkit
 
-Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.2.0**。
+Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.3.0**。
 
 **升级保留已有下载任务的启停状态、原配置、当日统计与运行中的 Realm；新自动下载任务默认关闭。** 不修改 SSH、防火墙、安全组、系统 Python 或 libc，不新增网站、TLS 监听或远程管理端口。HTTPS 仅作为下载客户端使用。
 
@@ -70,6 +70,20 @@ sudo vps-toolkit traffic resume --job 任务编号  # 继续暂停/停止/中断
 ```
 
 流量按 GB=10^9 字节、Mbps=10^6 比特/秒计量。所有新手动、新调度和受管理的兼容旧任务共用文件锁及每日/月预算；异常未结算预留按已消耗处理。协议开销、重传和其他应用流量不在有效负载统计中。要求完整 SHA256 的中断任务不能无文件恢复，需重新开始。
+
+## 实时下载进度（3.3.0）
+
+菜单 **10 下载任务调度 → 14 实时下载进度**，或主菜单 **11 流量统计**。每秒清屏刷新，输入 `0` 并回车返回，不会再多问一次返回。
+
+```sh
+sudo vps-toolkit traffic watch             # 终端实时页面，0 回车返回
+sudo vps-toolkit --human traffic progress  # 中文单次快照
+sudo vps-toolkit traffic progress          # JSON 单次快照
+```
+
+显示当前任务/兼容入口、已接收量、进度条、有效负载速度、设置限速、当前任务预计剩余时间、今日用量、剩余额度和整机累计比例缺口。兼容旧入口按当前分块显示百分比，另列全天用量。页面读取原子写入的 `progress.json`，不获取下载计量锁，下载运行中也可查看；不推进、清零或修改配额与累计网卡计量。
+
+实际已接收量最多约每秒更新，当前分块尚未结算的字节会明确区分；最终计费上限仍按原配额结算。连接等待、服务端故障、重试和比例变化会影响完成时间，ETA 只估计当前逻辑任务。进程已退出时不会把旧速度显示为仍在下载。进度文件固定覆盖写入，不按刷新次数产生新文件；下载内容照常清理。
 
 ## 定时下载与修改规则
 
@@ -186,13 +200,40 @@ sudo vps-toolkit agent verify
 
 分别识别 Aliyun 云助手/安全中心/云监控，Tencent TAT/Barad/Sgagent/主机安全及 cloud-init；对比进程、服务、包、目录、自启动位置，报告权限不足/未确认状态。DMI/系统信息不能确认厂商时，只审计；核实云控制台后可 `cloud select aliyun` 或 `cloud select tencent`，不会猜测实例类型。
 
-卸载仅执行你核实的官方程序，**每个组件单独确认**，本地程序必须 root 所有、不可被组/其他用户写入，并提供从可信官方发布物核实的 SHA256。例如：
+单项卸载保留逐组件确认：本地程序必须 root 所有、不可被组/其他用户写入，并提供从可信官方发布物核实的 SHA256。例如：
 
 ```sh
 sudo vps-toolkit agent remove barad --official-script /可信路径/官方卸载程序.sh --sha256 官方可信摘要 --confirm barad
 ```
 
-安全组件还需先在云控制台按官方要求完成自保护关闭/卸载授权，再传 `--console-authorized`。遇到验证码使用官方交互流程。没有可信程序或授权时停止，不杀进程、不改属性、不绕过防护、不强删目录、不抹日志。执行后重新审计，脚本退出成功也不等于组件已消失。
+安全组件还需先在云控制台按官方要求完成自保护关闭/卸载授权，再传 `--console-authorized`。遇到验证码使用官方交互流程。没有可信程序或授权时报告未完成；不另行强杀/强删安全客户端或绕过防护。官方卸载程序可停止和移除自己的组件。执行后重新审计，脚本退出成功也不等于组件已消失。
+
+### 一键批量卸载（含 cloud-init，3.3.0）
+
+主菜单 **3 检查客户机 Agent** 的结果页新增 `1 一键卸载全部已检测 Agent（含 cloud-init）`；也可进入 **4 Agent 卸载管理 → 1**。可选 `仅监控 Agent`，或保留原单项官方卸载。
+
+批量模式先显示本次可执行、被阻止和排除的清单、官方依据与影响，输入一次 `remove-all` 确认后逐项处理。对已安装、固定路径的卸载程序，自动检查 root 所有权、文件及上级目录权限，记录 SHA256 并在执行前校验未变；这个摘要用于确认后变更校验，**不把本地文件自动算成厂商签名认证**。缺少可信程序、平台不明/不匹配、自保护未授权的项目会明确报告。新发现的组件不会临时加入已确认批次。
+
+内置 TAT 上游固定提交的卸载程序，已审阅并固定摘要、保留来源与原 LICENSE；不用在目标服务器从 GitHub 在线拉取脚本。Barad/Sgagent/CloudMonitor 使用各自本地官方卸载入口；Sgagent 先于 Barad 处理。云助手使用包管理器依赖检查、官方守护程序参数及官方列出的精确目录清理，最后处理云助手/TAT，避免过早中断管理会话。阿里云安全中心缺少已准备的卸载程序时，需按官方链接取得程序或使用控制台卸载，不执行未核实的在线脚本。
+
+```sh
+# 只查看计划；默认范围为全部已检测组件，含 cloud-init
+sudo vps-toolkit --human agent remove-all --dry-run
+# 仅监控插件，不处理助手、安全客户端或 cloud-init
+sudo vps-toolkit --human agent remove-all --scope monitoring
+# 保留 cloud-init
+sudo vps-toolkit --human agent remove-all --keep-cloud-init
+# 查看最近逐项结果；完整文件位于 /var/lib/vps-toolkit/agent-removal/latest.json
+sudo vps-toolkit --human agent removal-report
+```
+
+**操作前通过独立 SSH/VNC 登录。** 云助手/TAT 卸载会使其会话和远程命令功能失效；菜单会询问连接独立性与网络持久化，命令行用 `--confirm-network-independent` 明确声明已核实。安全客户端先按官方流程完成控制台授权，才使用 `--console-authorized`，官方程序仍可能要求人工验证码。
+
+cloud-init 在批量模式默认尽力卸载：先查持久网络配置、备份网络与 SSH 配置，再检查精确软件包依赖；Debian/Ubuntu 用 dpkg，RPM 系用 rpm，均不使用 `--force`、`--nodeps` 或递归自动移除依赖。Alpine 仅在 APK 模拟能确认只移除 cloud-init 时执行。**保留网络配置（包括 50-cloud-init.yaml）、初始化历史和日志，不重启网络/服务器。** 配置在确认后改变、初始化仍在运行、网络尚未持久化时不继续。依赖拒绝、卸载失败或系统不支持安全移除时，尽力采用 [cloud-init 官方禁用标记](https://docs.cloud-init.io/en/latest/howto/disable_cloud_init.html) 禁用下次启动，并标为“仅禁用，未完全卸载”，不会冒充删除成功。配置与历史目录仍存在不等于程序仍安装。
+
+每项执行后复查；程序退出成功但仍有进程/安装证据时标为“仍有残留/需复核”。一个项目失败会继续其他已确认项目，中断会保存已执行和未执行状态。最近报告与上一份报告固定覆盖保存；不清理系统/业务日志，厂商程序可能删除自己的目录和日志。Realm、下载调度、配额与比例规则不属于卸载范围。
+
+客户机云监控、安全客户端和云助手是不同产品：监控采集指标、助手执行管理命令，安全客户端可能提供文件扫描等能力；检测到客户端不证明它已经上传私人文件。卸载本机 Agent 也不意味着宿主机/控制平面停止采集，不能据此保证“无监控”。
 
 cloud-init 先 `agent remove cloud-init --dry-run` 查看依赖模拟与持久网络文件；必须独立确认网络/SSH 持久化，并同时传 `--confirm-network-independent --confirm cloud-init` 才允许包管理器官方卸载。备份网络文件，保留 `50-cloud-init.yaml`，不重启网络。APK 等未实现安全卸载模拟的系统仅审计 cloud-init。
 

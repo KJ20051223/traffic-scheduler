@@ -70,7 +70,8 @@ def run(ctx, command):
 def action_page(ctx, title, action):
     screen(title)
     try:
-        action()
+        if action() is False:
+            return
     except Back:
         return
     except KeyboardInterrupt:
@@ -122,6 +123,54 @@ def agent_remove(ctx):
                 return
             command.append('--console-authorized')
     run(ctx, command)
+
+
+def remove_all(ctx, scope='all'):
+    from . import agent_batch
+    from .presentation import render
+    initial = agent_batch.plan(ctx, scope=scope)
+    detected = {item['id'] for item in initial['entries'] if item['status'] not in ('not_detected', 'excluded')}
+    independent = False
+    authorized = False
+    if detected & {'cloud-init', 'aliyun-assist', 'tat'}:
+        print('云助手卸载可能中断控制台免密会话；cloud-init 负责部分初始化和网络配置。')
+        independent = ask('已通过独立 SSH/VNC 登录，并核实网络和 SSH 配置已持久化？y/N', 'N').lower() == 'y'
+    if detected & {'aegis', 'yunjing'}:
+        print('安全客户端需按官方流程完成自保护/卸载授权，官方程序可能要求验证码。')
+        authorized = ask('已为本次检测到的安全客户端完成控制台卸载授权？y/N', 'N').lower() == 'y'
+    approved = agent_batch.plan(ctx, scope=scope, console_authorized=authorized, network_independent=independent)
+    screen('批量卸载 · 本次执行清单')
+    render(approved)
+    if not any(item['status'] == 'ready' for item in approved['entries']):
+        print('\n暂无可直接执行的项目，请按每项原因处理后重试。')
+        return
+    answer = ask('确认按上方清单执行，请输入 remove-all（其他输入取消）')
+    if answer != 'remove-all':
+        print('已取消，未执行卸载。')
+        return
+    print('\n开始逐项卸载，完成后显示每项结果……\n')
+    render(agent_batch.execute(ctx, approved, confirmation=answer))
+
+
+def agent_audit(ctx):
+    while True:
+        screen('Agent 检测与批量卸载')
+        if run(ctx, ['agent', 'audit']):
+            return
+        print('\n  1. 一键卸载全部已检测 Agent（含 cloud-init）\n  2. 仅卸载监控 Agent\n  0. 返回上一级')
+        choice = ask('请选择数字')
+        if choice == '0':
+            return False
+        if choice in ('1', '2'):
+            action_page(ctx, '批量卸载 Agent', lambda: remove_all(ctx, 'all' if choice == '1' else 'monitoring'))
+
+
+def agent_menu(ctx):
+    submenu(ctx, 'Agent 卸载管理', [
+        ('1', '一键卸载全部已检测 Agent（含 cloud-init）', lambda: remove_all(ctx)),
+        ('2', '仅卸载监控 Agent', lambda: remove_all(ctx, 'monitoring')),
+        ('3', '单项官方卸载', lambda: agent_remove(ctx)),
+        ('4', '查看上次批量卸载报告', lambda: run(ctx, ['agent', 'removal-report']))])
 
 
 def edit_rule(ctx, operation):
@@ -251,7 +300,8 @@ def traffic_menu(ctx):
                ('10', '时间窗口与随机权重', lambda: configure_time(ctx)),
                ('11', '恢复指定下载任务', lambda: run(ctx, ['traffic', 'resume', '--job', ask('完整任务编号')])),
                ('12', '添加授权下载资源', lambda: resource(ctx)),
-               ('13', '移除授权下载资源', lambda: resource(ctx, True))]
+               ('13', '移除授权下载资源', lambda: resource(ctx, True)),
+               ('14', '实时下载进度（每秒刷新）', lambda: watch_progress(ctx))]
     submenu(ctx, '下载任务调度', entries)
 
 
@@ -262,6 +312,11 @@ def update(ctx):
         run(ctx, ['update'])
     else:
         print('未执行更新。')
+
+
+def watch_progress(ctx):
+    from .progress import watch
+    return watch(ctx)
 
 
 def menu(ctx):
@@ -285,7 +340,11 @@ def menu(ctx):
             elif choice == '10':
                 traffic_menu(ctx)
             elif choice == '4':
-                action_page(ctx, title, lambda: agent_remove(ctx))
+                agent_menu(ctx)
+            elif choice in ('3', '5'):
+                agent_audit(ctx)
+            elif choice == '11':
+                action_page(ctx, '实时下载进度', lambda: watch_progress(ctx))
             elif choice == '9':
                 action_page(ctx, title, lambda: download(ctx))
             elif choice == '15':

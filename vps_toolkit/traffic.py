@@ -10,7 +10,7 @@ import uuid
 from urllib.parse import urlsplit
 from compat import traffic_scheduler as engine
 from .core import Context, Error, configuration, read_json, write_json
-from . import ratio, __version__
+from . import ratio, progress, __version__
 
 
 def moment(timezone='system', timestamp=None):
@@ -257,7 +257,8 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
                         kind = 'generated' if urlsplit(url).hostname == 'speed.cloudflare.com' and urlsplit(url).path == '/__down' else 'file'
                         engine.transfer(network, 'download', {'region': item['region'], 'mbps': rate},
                                         {'name': '用户授权资源', 'url': url, 'kind': kind}, piece,
-                                        directory, data, path, pacer, offset=offset, hasher=hasher)
+                                        directory, data, path, pacer, offset=offset, hasher=hasher,
+                                        progress=progress.reporter(directory, data, requested=amount, job_id=identifier, offset=offset))
                         retries = 0
                     except engine.ERRORS as exc:
                         retries += 1
@@ -283,6 +284,7 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
         finally:
             job['finished'] = moment(item['timezone']).isoformat()
             write_json(job_path, job)
+            progress.finish(directory, job['status'])
             active = task_directory(ctx) / 'active.json'
             if active.exists():
                 active.unlink()

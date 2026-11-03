@@ -120,6 +120,9 @@ class ToolkitTests(unittest.TestCase):
         state = traffic.status(self.ctx, self.at)
         self.assertEqual(state['today_bytes'], 3_000_017)
         self.assertFalse(list(self.ctx.path('/var/lib/traffic-scheduler').glob('payload-*')))
+        progress_record = read_json(self.ctx.path('/var/lib/traffic-scheduler/progress.json'))
+        self.assertEqual(progress_record['status'], 'completed')
+        self.assertEqual(progress_record['received_bytes'], 3_000_017)
 
     def test_ratio_download_stops_after_business_download_eliminates_deficit(self):
         self.cfg['traffic']['strategy'] = 'ratio'

@@ -21,10 +21,10 @@ def redact(text):
     return re.sub(r'(https?://)[^/\s@]+:[^/\s@]+@', r'\1[REDACTED]@', text)
 
 
-def run(argv, timeout=30, check=False, interactive=False):
+def run(argv, timeout=30, check=False, interactive=False, cwd=None):
     try:
         result = subprocess.run([str(a) for a in argv], capture_output=not interactive, text=True,
-                                errors='replace', timeout=timeout, stdin=None if interactive else subprocess.DEVNULL)
+                                errors='replace', timeout=timeout, stdin=None if interactive else subprocess.DEVNULL, cwd=cwd)
         result.stdout, result.stderr = result.stdout or '', result.stderr or ''
     except (OSError, subprocess.TimeoutExpired) as exc:
         result = subprocess.CompletedProcess(argv, 127, '', redact(exc))
