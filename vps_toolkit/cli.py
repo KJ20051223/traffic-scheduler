@@ -318,7 +318,28 @@ def menu(ctx):
                     '14': ['backup', 'create'], '16': ['logs'], '17': ['update', '--check']}
         if choice == '4':
             component = input('组件（{}）: '.format(', '.join(agent.CATALOG))).strip()
-            commands[choice] = ['agent', 'remove', component, '--dry-run']
+            if main(['agent', 'remove', component, '--dry-run'], ctx):
+                continue
+            if input('已核实上述官方计划，进入卸载确认？[y/N]: ').strip().lower() != 'y':
+                continue
+            command = ['agent', 'remove', component]
+            if component == 'cloud-init':
+                if input('确认网络和 SSH 已独立持久化，请输入 network-independent: ').strip() != 'network-independent':
+                    print('已取消')
+                    continue
+                command.append('--confirm-network-independent')
+            else:
+                script = input('官方卸载程序路径（留空使用已检测路径）: ').strip()
+                if script:
+                    command += ['--official-script', script]
+                command += ['--sha256', input('从可信官方发布物核实的程序 SHA256: ').strip()]
+                if agent.CATALOG[component].get('protected'):
+                    if input('已按官方流程完成控制台卸载授权？[y/N]: ').strip().lower() != 'y':
+                        print('已取消')
+                        continue
+                    command.append('--console-authorized')
+            # remove() still requires the component-specific final confirmation.
+            commands[choice] = command
         elif choice == '7':
             operation = input('list / add / edit / delete [list]: ').strip() or 'list'
             command = ['pf', 'rule', operation]
@@ -347,6 +368,12 @@ def menu(ctx):
             commands[choice] = ['backup', 'restore', input('备份路径: ').strip(), '--apply']
         elif choice == '18':
             commands[choice] = ['uninstall']
+        elif choice == '17':
+            if main(['update', '--check'], ctx):
+                continue
+            if input('下载验证并更新管理工具？[y/N]: ').strip().lower() != 'y':
+                continue
+            commands[choice] = ['update']
         if choice in commands:
             try:
                 main(commands[choice], ctx)
