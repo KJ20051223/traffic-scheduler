@@ -59,7 +59,7 @@ def validate(item):
     elif item['reserve_mbps']:
         raise Error('配置预留带宽时必须同时提供链路总带宽')
     weights = item.get('hourly_weights', [1] * 24)
-    if len(weights) != 24 or any(type(w) not in (float, int) or not math.isfinite(w) or w <= 0 for w in weights):
+    if len(weights) != 24 or any(type(w) not in (float, int) or not math.isfinite(w) or not 0 < w <= 1e6 for w in weights):
         raise Error('小时权重须为 24 个正数')
     for value in list(item.get('times', [])) + item.get('window', []):
         if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', value):

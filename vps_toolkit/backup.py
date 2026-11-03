@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import tarfile
-from .core import Error, atomic, confirm, read_json
+from .core import Error, atomic, confirm, read_json, configuration
 
 
 PREFIXES = ('etc/vps-toolkit/', 'etc/traffic-scheduler/', 'etc/realm/', 'var/lib/traffic-scheduler/')
@@ -39,6 +39,17 @@ def create(ctx, output=None):
 
 
 def restore(ctx, archive, dry_run=True, confirmation=None):
+    if dry_run:
+        return _restore(ctx, archive, True, confirmation)
+    ctx.require_root()
+    confirm('restore', confirmation)
+    # Freeze all manual/automatic writers while merging existing counters.
+    from compat.traffic_scheduler import locked
+    with locked(ctx.path(configuration(ctx)['traffic']['state_dir'])):
+        return _restore(ctx, archive, False, 'restore')
+
+
+def _restore(ctx, archive, dry_run=True, confirmation=None):
     prepared = {}
     with tarfile.open(str(archive), 'r:*') as bundle:
         entries = bundle.getmembers()

@@ -138,6 +138,47 @@ class ToolkitTests(unittest.TestCase):
         with self.assertRaises(Error):
             self.download(url='https://other.invalid/file', size=1)
         self.assertEqual(Handler.ranges, [])
+
+    def test_legacy_bridge_obeys_global_budget_rate_pause_and_authorization(self):
+        self.cfg['traffic'].update(daily_bytes=100, monthly_bytes=100, mbps=2)
+        save_config(self.ctx, self.cfg)
+        old = traffic.engine.default_config()
+        old['directions']['download']['targets'] = [{'name': 'fixture', 'url': 'http://example.com/file', 'kind': 'range'}]
+        directory, _, data, _ = traffic.ledger(self.ctx, self.cfg['traffic'], self.at)
+        data['download']['bytes'] = 37
+        def fixture_configuration(context):
+            config = read_json(context.config_path)
+            config['traffic']['state_dir'] = str(directory)
+            return config
+        with patch.object(traffic, 'Context', return_value=self.ctx), patch.object(traffic, 'configuration', side_effect=fixture_configuration):
+            self.assertEqual(traffic.legacy_allowance(old, data, directory), 63)
+            self.assertEqual(old['directions']['download']['mbps'], 2)
+            self.cfg['traffic']['paused'] = True
+            save_config(self.ctx, self.cfg)
+            self.assertEqual(traffic.legacy_allowance(old, data, directory), 0)
+            self.cfg['traffic'].update(paused=False, authorized_urls=[])
+            save_config(self.ctx, self.cfg)
+            with self.assertRaises(Error):
+                traffic.legacy_allowance(old, data, directory)
+
+    def test_schedule_window_midnight_gate_and_missed_slots_replanned(self):
+        self.cfg['traffic'].update(enabled=True, daily_bytes=1_000_000, task_bytes=100_000,
+                                   window=['10:00', '20:00'], mbps=1)
+        save_config(self.ctx, self.cfg)
+        midnight = self.at.replace(hour=0, minute=0)
+        with patch.object(traffic, 'download') as transfer:
+            self.assertTrue(traffic.tick(self.ctx, midnight)['skipped'])
+            transfer.assert_not_called()
+        plan_path = traffic.task_directory(self.ctx) / 'plan-2026-11-03.json'
+        plan = read_json(plan_path)
+        self.assertEqual(len(plan['minutes']), 10)
+        self.assertTrue(all(600 <= n <= 1200 for n in plan['minutes']))
+        self.assertGreaterEqual(plan['not_before'], 10)
+        later = self.at.replace(hour=18, minute=0)
+        with patch.object(traffic, 'download', return_value={'fixture': True}):
+            traffic.tick(self.ctx, later)
+        repaired = read_json(plan_path)
+        self.assertGreaterEqual(sum(n >= 1080 for n in repaired['minutes']), 10)
     def test_checksum_failure_keeps_actual_usage_and_cleans_content(self):
         with self.assertRaises(Error):
             self.download(size=17, expected_sha256='0' * 64)

@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "cloud_override": null,
+  "trusted_sources": [],
+  "forwarder": {
+    "config": "/etc/realm/config.json",
+    "binary": "/usr/local/bin/realm",
+    "service": "realm"
+  },
+  "traffic": {
+    "enabled": false,
+    "timezone": "system",
+    "daily_bytes": 20000000000,
+    "monthly_bytes": 600000000000,
+    "task_bytes": 100000000,
+    "mbps": 5.0,
+    "max_runtime": 300,
+    "max_concurrency": 1,
+    "link_mbps": null,
+    "reserve_mbps": 0,
+    "authorized_urls": [],
+    "region": "cn",
+    "state_dir": "/var/lib/traffic-scheduler",
+    "times": [],
+    "window": [
+      "00:00",
+      "23:59"
+    ],
+    "paused": false,
+    "hourly_weights": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  }
+}
