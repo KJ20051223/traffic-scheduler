@@ -3,6 +3,13 @@ set -eu
 mkdir -p /tmp/toolkit-suite
 cp -R /source/. /tmp/toolkit-suite/
 cd /tmp/toolkit-suite
+# Test-only EOL fixture setup. Production bootstrap NEVER changes apt sources.
+# Bullseye's standard security pool has been archived; package signatures remain required.
+if [ "$(. /etc/os-release; printf '%s' "$ID:$VERSION_ID")" = debian:11 ]; then
+    printf '%s\n' \
+      'deb http://archive.debian.org/debian bullseye main' \
+      'deb http://archive.debian.org/debian-security bullseye-security main' > /etc/apt/sources.list
+fi
 sh ./install.sh --no-wizard
 vps-toolkit --version
 vps-toolkit traffic status

@@ -90,7 +90,18 @@ def transient(error):
     return not isinstance(error, (ValueError, ssl.SSLCertVerificationError))
 
 
+def toolkit_home():
+    path = Path('/opt/vps-toolkit/current')
+    return path if (path / 'vps_toolkit').is_dir() and Path('/etc/vps-toolkit/config.json').is_file() else None
+
+
 def now():
+    toolkit = toolkit_home()
+    if toolkit:
+        sys.path.insert(0, str(toolkit))
+        from vps_toolkit.core import Context, configuration
+        from vps_toolkit.traffic import moment
+        return moment(configuration(Context())['traffic']['timezone'])
     return dt.datetime.now(BJ)
 
 
@@ -654,8 +665,8 @@ def tick(config, directory, rng=None):
         elif extend_plan(config, data, moment, rng):
             atomic_json(path, data)
         allowance = None
-        toolkit = Path('/opt/vps-toolkit/current')
-        if (toolkit / 'vps_toolkit').is_dir() and Path('/etc/vps-toolkit/config.json').is_file():
+        toolkit = toolkit_home()
+        if toolkit:
             sys.path.insert(0, str(toolkit))
             try:
                 from vps_toolkit.traffic import legacy_allowance
@@ -877,8 +888,8 @@ def main():
     if args.command == 'test':
         if not math.isfinite(args.mb) or not 0.001 <= args.mb <= 1000:
             raise ValueError('测试量必须在 0.001–1000 MB 之间')
-        toolkit = Path('/opt/vps-toolkit/current')
-        if (toolkit / 'vps_toolkit').is_dir() and Path('/etc/vps-toolkit/config.json').is_file():
+        toolkit = toolkit_home()
+        if toolkit:
             sys.path.insert(0, str(toolkit))
             from vps_toolkit.traffic import legacy_test
             legacy_test(config, args.state_dir, args.mb)

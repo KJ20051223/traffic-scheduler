@@ -101,7 +101,7 @@ class Tests(unittest.TestCase):
         # These tests exercise the standalone engine using a temporary ledger.
         # The unified-policy bridge has separate integration tests, and must
         # not read a real host's /etc config after CI installs the toolkit.
-        policy = patch('vps_toolkit.traffic.legacy_allowance', return_value=10**30)
+        policy = patch.object(t, 'toolkit_home', return_value=None)
         policy.start()
         self.addCleanup(policy.stop)
         test_root = Path(__file__).resolve().parent

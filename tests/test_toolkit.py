@@ -401,3 +401,57 @@ class ToolkitTests(unittest.TestCase):
         from vps_toolkit.core import redact
         self.assertNotIn('secretvalue', redact('{"password": "secretvalue"}'))
         self.assertNotIn('abc123', redact('Authorization: Bearer abc123'))
+
+    def test_legacy_clock_uses_shared_calendar(self):
+        clock = dt.datetime(2026, 11, 2, 23, tzinfo=dt.timezone.utc)
+        with patch.object(traffic.engine, 'toolkit_home', return_value=Path('/fixture')), \
+                patch.object(traffic, 'moment', return_value=clock) as get_time, \
+                patch('vps_toolkit.core.Context', return_value=self.ctx):
+            self.assertEqual(traffic.engine.now(), clock)
+            get_time.assert_called_once_with('system')
+
+    @unittest.skipUnless(os.name == 'posix', 'installer uses POSIX accounts')
+    def test_install_disk_full_refuses_before_replacing_commands(self):
+        import types
+        base = Path(__file__).resolve().parents[1]
+        if not (base / 'MANIFEST.json').exists():
+            base = base.parent.parent / 'outputs/vps-toolkit'
+        spec = importlib.util.spec_from_file_location('disk_full_installer', base / 'install.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        command = self.ctx.path('/usr/local/bin/pf')
+        atomic(command, '#!/bin/sh\necho old\n')
+        with patch.object(installer.shutil, 'disk_usage', return_value=types.SimpleNamespace(free=0)):
+            with self.assertRaises(Error):
+                installer.install(self.ctx, no_wizard=True)
+        self.assertEqual(command.read_text(), '#!/bin/sh\necho old\n')
+        self.assertFalse(self.ctx.path('/opt/vps-toolkit/current').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'installer uses POSIX accounts')
+    def test_installer_failed_reload_restores_current_and_own_files(self):
+        import types
+        base = Path(__file__).resolve().parents[1]
+        if not (base / 'MANIFEST.json').exists():
+            base = base.parent.parent / 'outputs/vps-toolkit'
+        spec = importlib.util.spec_from_file_location('rollback_installer', base / 'install.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        original = self.ctx.config_path.read_bytes()
+        old_release = self.ctx.path('/opt/vps-toolkit/releases/old')
+        old_release.mkdir(parents=True)
+        current = old_release.parent.parent / 'current'
+        current.symlink_to('releases/old', target_is_directory=True)
+        def broken_reload(argv, **kwargs):
+            if argv == ['systemctl', 'daemon-reload']:
+                raise Error('simulated reload failure')
+            return self.runner(argv, **kwargs)
+        self.ctx.run = broken_reload
+        account = types.SimpleNamespace(pw_uid=65534, pw_gid=65534)
+        with patch.object(installer.pwd, 'getpwnam', return_value=account), \
+                patch.object(installer.grp, 'getgrnam', return_value=types.SimpleNamespace(gr_gid=65534)), \
+                patch.object(os, 'chown'):
+            with self.assertRaises(Error):
+                installer.install(self.ctx, no_wizard=True)
+        self.assertEqual(current.resolve(), old_release.resolve())
+        self.assertEqual(self.ctx.config_path.read_bytes(), original)
+        self.assertFalse(self.ctx.path('/usr/local/bin/vps-toolkit').exists())

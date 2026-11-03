@@ -2,7 +2,9 @@ name: VPS Toolkit verification
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', 'README.md', 'update.json']
   pull_request:
+    paths-ignore: ['docs/**', 'README.md', 'update.json']
   workflow_dispatch:
 permissions:
   contents: read

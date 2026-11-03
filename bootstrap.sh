@@ -16,6 +16,9 @@ done
 [ "$(uname -s)" = Linux ] || { echo '仅支持 Linux' >&2; exit 1; }
 # shellcheck disable=SC1091
 . /etc/os-release
+if [ "${ID:-}" = debian ] && [ "${VERSION_ID:-}" = 11 ]; then
+    echo '注意：Debian 11 已结束标准 LTS。软件源可能需管理员迁移到官方归档；本工具不会自动改源。' >&2
+fi
 select_python() {
     for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3.8; do
         if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import ssl,fcntl,sys;sys.exit(sys.version_info<(3,8))' 2>/dev/null; then

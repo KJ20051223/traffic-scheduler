@@ -19,3 +19,5 @@ TencentOS 镜像来源：[官方基础镜像文档](https://intl.cloud.tencent.c
 x86_64 与 ARM64 在各自原生 Ubuntu runner 上下载、验证、执行固定 musl Realm，分别测试真实 TCP/UDP 回环转发。单元测试覆盖 HTTP Range 顺序下载及 SHA256、日/月/单任务预算、异常预留、锁冲突、暂停、坏摘要、安装保留状态、规则失败回滚、恢复不重置额度、安全卸载取消等。
 
 没有用容器证明 systemd 开机自启、整机重启网络持久性、厂商自保护/验证码卸载、云控制台显示同步。也未在缺失加载器的实际故障主机升级 libc；实现会预检后拒绝不兼容二进制。
+
+2026-11-03 的 Debian 11 默认源实测出现 bullseye-security 包 404。CI 因此仅在一次性 Debian 11 测试容器中预设官方 archive.debian.org 归档源，仍要求包签名验证；正式安装器只提示 EOL，不改用户源。该结果不能解释为默认旧源仍可用。[Debian 官方归档记录](https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1147150)。

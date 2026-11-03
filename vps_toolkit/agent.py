@@ -102,6 +102,8 @@ def audit(ctx):
                     if pattern.search(line) and ('\t' not in line or '\tinstalled' in line)]
         startup = [path for path, text in facts['startup'] if pattern.search(text)]
         state = '运行中' if processes or running_units else '已安装/残留，未确认运行' if paths or units or packages else '未发现已知组件'
+        if state == '未发现已知组件' and startup:
+            state = '仅发现安装/启动记录，未确认安装'
         if state == '未发现已知组件' and facts['limitations']:
             state = '无法确定'
         results.append(dict(id=identifier, state=state, paths=paths, processes=processes,
