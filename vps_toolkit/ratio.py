@@ -3,6 +3,7 @@ from fractions import Fraction
 import math
 import re
 import time
+import unicodedata
 from .core import Error, atomic, read_json, write_json
 
 
@@ -10,13 +11,25 @@ DEFAULTS = {'strategy': 'quota', 'ratio': '1:2', 'ratio_interface': 'auto',
             'ratio_tolerance_pct': 5.0, 'ratio_schedule': 'follow'}
 
 
-def factor(value):
-    if not isinstance(value, str) or not re.fullmatch(r'\d+(?:\.\d+)?\s*:\s*\d+(?:\.\d+)?', value):
+def _parse(value):
+    if not isinstance(value, str):
         raise Error('比例格式为 上行:下行，例如 1:2')
-    up, down = [Fraction(part.strip()) for part in value.split(':')]
+    value = unicodedata.normalize('NFKC', value).translate({0x200b: None, 0xfeff: None}).replace('∶', ':').strip()
+    if not re.fullmatch(r'\d+(?:\.\d+)?\s*:\s*\d+(?:\.\d+)?', value):
+        raise Error('比例格式为 上行:下行，例如 1:2')
+    parts = [part.strip() for part in value.split(':')]
+    up, down = [Fraction(part) for part in parts]
     if up <= 0 or down <= 0 or not Fraction(1, 100) <= down / up <= 100:
         raise Error('比例必须为正数，下行/上行须在 0.01–100 之间')
-    return down / up
+    return ':'.join(parts), down / up
+
+
+def normalize(value):
+    return _parse(value)[0]
+
+
+def factor(value):
+    return _parse(value)[1]
 
 
 def names(selector):
@@ -32,7 +45,7 @@ def validate(item):
         item.setdefault(key, value)
     if item['strategy'] not in ('quota', 'ratio') or item['ratio_schedule'] not in ('follow', 'random'):
         raise Error('strategy 须为 quota/ratio；ratio_schedule 须为 follow/random')
-    factor(item['ratio'])
+    item['ratio'] = normalize(item['ratio'])
     names(item['ratio_interface'])
     tolerance = item['ratio_tolerance_pct']
     if type(tolerance) not in (int, float) or not math.isfinite(tolerance) or not 0 <= tolerance <= 20:
@@ -138,6 +151,14 @@ def view(item, state):
                 note='累计网卡 TX/RX（含业务、脚本和协议开销），不按日/月清零；不足 1 MB 不启动补流。')
 
 
+def initial_state(item, current, timestamp):
+    """Build a first-boot observation without saving or changing any budget."""
+    return dict(version=1, selector=item['ratio_interface'], tx=sum(v['tx'] for v in current['interfaces'].values()),
+                rx=sum(v['rx'] for v in current['interfaces'].values()), raw=current, started=timestamp,
+                sampled_at=timestamp, calibrated=False,
+                warnings=['首次接入采用本次开机网卡累计值；此前重启丢失的历史未知，可用 ratio-seed 补录。'])
+
+
 def sample(ctx, item, timestamp=None):
     validate(item)
     timestamp = time.time() if timestamp is None else timestamp
@@ -151,10 +172,7 @@ def sample(ctx, item, timestamp=None):
         selected = auto_interfaces(ctx) if item['ratio_interface'] == 'auto' else names(item['ratio_interface'])
     current = snapshot(ctx, selected)
     if state is None:
-        state = dict(version=1, selector=item['ratio_interface'], tx=sum(v['tx'] for v in current['interfaces'].values()),
-                     rx=sum(v['rx'] for v in current['interfaces'].values()), raw=current, started=timestamp,
-                     sampled_at=timestamp, calibrated=False,
-                     warnings=['首次接入采用本次开机网卡累计值；此前重启丢失的历史未知，可用 ratio-seed 补录。'])
+        state = initial_state(item, current, timestamp)
     else:
         previous = state['raw']
         reset = previous['boot'] != current['boot']

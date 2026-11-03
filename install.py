@@ -97,6 +97,12 @@ def install(ctx, python=sys.executable, no_wizard=False):
                 if destination.exists() and 'Managed by vps-toolkit' not in destination.read_text():
                     raise Error('存在其他同名服务，拒绝覆盖')
                 replace(destination, (SOURCE / 'services' / name).read_text().replace('/usr/bin/python3', python), 0o644)
+            old_service = ctx.path('/etc/systemd/system/traffic-scheduler.service')
+            if old_service.is_file() and '/usr/local/bin/traffic-scheduler' in old_service.read_text():
+                dropin = ctx.path('/etc/systemd/system/traffic-scheduler.service.d/50-vps-toolkit.conf')
+                if dropin.is_symlink() or dropin.exists() and 'Managed by vps-toolkit' not in dropin.read_text():
+                    raise Error('已有其他同名旧任务兼容配置，拒绝覆盖')
+                replace(dropin, (SOURCE / 'services/traffic-scheduler-toolkit.conf').read_text(), 0o644)
         elif info['init'] == 'openrc':
             destination = ctx.path('/etc/init.d/vps-toolkit-traffic')
             if destination.exists() and 'Managed by vps-toolkit' not in destination.read_text():

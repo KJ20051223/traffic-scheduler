@@ -161,6 +161,33 @@ def task_directory(ctx):
     return ctx.state / 'traffic'
 
 
+def initialize_meter(ctx, item=None):
+    """Automatically establish a missing baseline, without waiting for a busy transfer."""
+    item = validate(item if item is not None else configuration(ctx)['traffic'])
+    if item['strategy'] != 'ratio':
+        return {'status': 'not_applicable', 'note': '当前为固定额度模式'}
+    path = ratio.state_path(ctx)
+    try:
+        state = read_json(path)
+        if state is not None:
+            ratio.check_state(state)
+            if state['selector'] != item['ratio_interface']:
+                raise Error('已有累计计量网卡与设置不一致；请通过累计流量校准切换，不自动清零')
+            return {'status': 'ready', 'note': '已有整机累计计量记录，继续累计，不重置历史'}
+        selected = ratio.auto_interfaces(ctx) if item['ratio_interface'] == 'auto' else ratio.names(item['ratio_interface'])
+        ratio.snapshot(ctx, selected)  # Diagnose unreadable counters before attempting the shared lock.
+        with engine.locked(ctx.path(item['state_dir'])):
+            machine = ratio.sample(ctx, item)
+        return {'status': 'ready', 'note': '已自动读取本次开机网卡累计流量并保存计量基线，无需手动输入',
+                'machine_traffic': machine}
+    except engine.Stop:
+        return {'status': 'pending', 'note': '下载正在使用计量锁；进度页先显示网卡实测预览，空闲后自动保存基线'}
+    except (Error, OSError) as exc:
+        return {'status': 'unavailable', 'note': str(exc),
+                'manual_interface': not path.exists(),
+                'help': '请在比例设置中手动指定真实出口网卡；重启前丢失的历史可在累计流量校准中补录。实时计数不可读时停止比例补下载，不按零流量计算。'}
+
+
 def status(ctx, at=None):
     item = validate(configuration(ctx)['traffic'])
     with engine.locked(ctx.path(item['state_dir'])):

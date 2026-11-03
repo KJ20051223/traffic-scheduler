@@ -1,7 +1,11 @@
+import contextlib
+import os
 import tempfile
 import unittest
-from vps_toolkit import ratio
-from vps_toolkit.core import Context, Error, atomic, defaults, read_json, write_json
+from unittest.mock import patch
+from vps_toolkit import ratio, traffic
+from vps_toolkit.core import Context, Error, atomic, defaults, read_json, save_config, write_json
+from fractions import Fraction
 
 
 class RatioTests(unittest.TestCase):
@@ -11,6 +15,10 @@ class RatioTests(unittest.TestCase):
         self.ctx = Context(self.temp.name)
         self.item = defaults()['traffic']
         self.item.update(strategy='ratio', ratio_tolerance_pct=0)
+        if os.name != 'posix':
+            locker = patch.object(traffic.engine, 'locked', side_effect=lambda directory: contextlib.nullcontext())
+            locker.start()
+            self.addCleanup(locker.stop)
         atomic(self.ctx.path('/proc/net/route'),
                'Iface Destination Gateway Flags RefCnt Use Metric Mask\n'
                'eth0 00000000 0100000A 0003 0 0 100 00000000\n'
@@ -55,6 +63,28 @@ class RatioTests(unittest.TestCase):
         self.assertEqual(self.sample()['needed_bytes'], 0)
         ratio.seed(self.ctx, self.item, 0, 0)
         self.assertEqual(self.sample()['needed_bytes'], 0)
+
+    def test_ratio_input_normalizes_width_whitespace_and_clipboard_marks(self):
+        for value, expected, factor in (
+                ('1:2', '1:2', Fraction(2)),
+                (' 1:2 ', '1:2', Fraction(2)),
+                ('1 : 2', '1:2', Fraction(2)),
+                ('１：２', '1:2', Fraction(2)),
+                ('1∶2', '1:2', Fraction(2)),
+                ('\ufeff\u200b１\u00a0：\u00a0２\u200b ', '1:2', Fraction(2)),
+                (' ２.５ ： ３ ', '2.5:3', Fraction(6, 5))):
+            with self.subTest(value=repr(value)):
+                self.assertEqual(ratio.normalize(value), expected)
+                self.assertEqual(ratio.factor(value), factor)
+        for value in (None, 2, '1 0:2', '1:2:3', '1/2', '1:-2', '1:0', '1:1000', '1e0:2'):
+            with self.subTest(invalid=repr(value)), self.assertRaises(Error):
+                ratio.normalize(value)
+
+    def test_validating_pasted_ratio_keeps_exact_factor_and_canonical_setting(self):
+        self.item['ratio'] = '\ufeff２.５ ： ３\u200b'
+        ratio.validate(self.item)
+        self.assertEqual(self.item['ratio'], '2.5:3')
+        self.assertEqual(self.sample()['target_download_bytes'], 6_000_000_000)
 
     def test_tolerance_and_small_deficit_avoid_tiny_repeated_transfers(self):
         self.item['ratio_tolerance_pct'] = 5
@@ -150,3 +180,42 @@ class RatioTests(unittest.TestCase):
         self.item['ratio_tolerance_pct'] = float('nan')
         with self.assertRaises(Error):
             ratio.validate(self.item)
+
+    def test_auto_initialization_reads_existing_machine_traffic_and_preserves_quota(self):
+        quota = self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-03.json')
+        write_json(quota, {'download': {'bytes': 12345}})
+        before = quota.read_bytes()
+        result = traffic.initialize_meter(self.ctx, self.item)
+        self.assertEqual(result['status'], 'ready')
+        self.assertEqual(result['machine_traffic']['upload_bytes'], 5_000_000_000)
+        self.assertEqual(result['machine_traffic']['download_bytes'], 6_000_000_000)
+        self.assertEqual(read_json(ratio.state_path(self.ctx))['tx'], 5_000_000_000)
+        self.assertEqual(quota.read_bytes(), before)
+
+    def test_auto_initialization_never_resets_existing_meter(self):
+        self.sample()
+        before = ratio.state_path(self.ctx).read_bytes()
+        with patch.object(ratio, 'snapshot', side_effect=AssertionError('must not resample an existing baseline')):
+            self.assertEqual(traffic.initialize_meter(self.ctx, self.item)['status'], 'ready')
+        self.assertEqual(ratio.state_path(self.ctx).read_bytes(), before)
+
+    def test_auto_initialization_defers_when_download_holds_lock(self):
+        with patch.object(traffic.engine, 'locked', side_effect=traffic.engine.Stop('busy')):
+            result = traffic.initialize_meter(self.ctx, self.item)
+        self.assertEqual(result['status'], 'pending')
+        self.assertFalse(ratio.state_path(self.ctx).exists())
+        self.assertNotIn('manual_interface', result)
+
+    def test_auto_initialization_prompts_manual_interface_only_after_read_failure(self):
+        self.ctx.path('/proc/net/route').unlink()
+        result = traffic.initialize_meter(self.ctx, self.item)
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertTrue(result['manual_interface'])
+        self.assertFalse(ratio.state_path(self.ctx).exists())
+        self.item['ratio_interface'] = 'eth0'
+        self.assertEqual(traffic.initialize_meter(self.ctx, self.item)['status'], 'ready')
+        atomic(ratio.state_path(self.ctx), '{broken')
+        result = traffic.initialize_meter(self.ctx, self.item)
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertFalse(result['manual_interface'])
+        self.assertEqual(ratio.state_path(self.ctx).read_text(), '{broken')

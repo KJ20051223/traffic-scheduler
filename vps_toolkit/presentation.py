@@ -41,6 +41,7 @@ LABELS = {'saved': '已保存至', 'exported': '已导出至', 'archive': '备�
           'actual_down_per_up': '当前下行/上行', 'interfaces': '计量网卡', 'calibrated': '已人工校准',
           'started': '开始时间', 'sampled_at': '采样时间', 'fillable_now_bytes': '剩余预算内可补',
           'limited_by_budget': '缺口受预算限制', 'readable': '可读取', 'ok': '正常',
+          'baseline_persisted': '累计计量基线已保存',
           'confidence': '识别依据强度', 'evidence': '识别依据', 'instance_type': '实例类型',
           'remote': '目标地址', 'listen': '监听地址', 'network': '网络设置', 'endpoints': '转发规则',
           'no_tcp': '关闭 TCP', 'use_udp': '启用 UDP', 'extra_remotes': '额外后端', 'balance': '负载策略',
@@ -218,6 +219,7 @@ def render_progress(value):
         filled = int(percent * 24 / 100)
         row('当前任务进度', '[{}{}] {:.1f}%'.format('#' * filled, '-' * (24 - filled), percent))
         row('已接收 / 本次目标', '{} / {}'.format(size(value['received_bytes']), size(value['requested_bytes'])))
+        row('本次任务还剩', size(max(0, value['requested_bytes'] - value['received_bytes'])))
     row('当前有效负载速度', '{:.2f} Mbps'.format(value['speed_mbps']))
     row('设置限速', '{} Mbps'.format(value['configured_mbps']))
     if value.get('eta_seconds') is not None:
@@ -226,12 +228,16 @@ def render_progress(value):
     row('今日已接收（含待结算）', size(value['today_bytes']))
     row('今日已结算', size(value['today_settled_bytes']))
     row('每日补下载上限', size(value['daily_limit_bytes']))
-    row('剩余额度', size(value['remaining_bytes']))
+    row('当前剩余下载预算', size(value['remaining_bytes']))
     row('策略', value['strategy'])
     row('下载已暂停', value['paused'])
     if value.get('machine_traffic'):
         section('整机累计比例')
-        tree(value['machine_traffic'])
+        machine = value['machine_traffic']
+        if 'needed_bytes' in machine:
+            row('达到比例还需补下载（含容差）', size(machine['needed_bytes']))
+            row('当前预算内最多可补', size(machine['fillable_now_bytes']))
+        tree({key: data for key, data in machine.items() if key not in ('needed_bytes', 'fillable_now_bytes')})
     row('说明', value['note'])
 
 
@@ -291,6 +297,13 @@ def render(value, args=None):
         row('文件', value.get('saved'))
         section('当前下载设置')
         traffic_settings(value['traffic'])
+        if value.get('machine_initialization'):
+            initialization = value['machine_initialization']
+            section('整机流量自动读取', initialization['note'])
+            if initialization.get('machine_traffic'):
+                tree(initialization['machine_traffic'])
+            if initialization.get('help'):
+                row('处理方式', initialization['help'])
     elif 'requested_bytes' in value and 'received_bytes' in value:
         row('下载结果', value.get('status'))
         row('任务编号', value.get('id'))

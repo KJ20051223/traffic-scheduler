@@ -193,6 +193,21 @@ class ToolkitTests(unittest.TestCase):
             self.assertEqual(main(['traffic', 'ratio-seed', '--upload-gb', '5', '--download-gb', '6'], self.ctx), 0)
         self.assertEqual(seed.call_args.args[2:], (5_000_000_000, 6_000_000_000))
         self.assertEqual(read_json(path)['download']['bytes'], 12345)
+    def test_ratio_cli_normalizes_paste_and_rejects_invalid_setting_without_saving(self):
+        with patch('sys.stdout', new=io.StringIO()):
+            self.assertEqual(main(['traffic', 'configure', '--strategy', 'ratio', '--ratio', '\ufeff１ ： ２\u200b',
+                                   '--mbps', '5', '--ratio-schedule', 'random'], self.ctx), 0)
+        saved = read_json(self.ctx.config_path)['traffic']
+        self.assertEqual(saved['ratio'], '1:2')
+        self.assertEqual(saved['strategy'], 'ratio')
+        self.assertEqual(saved['ratio_schedule'], 'random')
+        self.assertEqual(saved['daily_bytes'], self.cfg['traffic']['daily_bytes'])
+        self.assertFalse(saved['enabled'])
+        before = self.ctx.config_path.read_bytes()
+        with patch('sys.stderr', new=io.StringIO()):
+            self.assertEqual(main(['traffic', 'configure', '--ratio', '1:0'], self.ctx), 1)
+        self.assertEqual(self.ctx.config_path.read_bytes(), before)
+
     def test_daily_and_monthly_budgets_include_legacy_downloads(self):
         self.cfg['traffic'].update(daily_bytes=50, monthly_bytes=60)
         save_config(self.ctx, self.cfg)
@@ -490,6 +505,9 @@ class ToolkitTests(unittest.TestCase):
         original = '#!/bin/sh\necho original-pf\n'
         atomic(self.ctx.path('/usr/local/bin/pf'), original, 0o755)
         atomic(self.ctx.path('/etc/systemd/system/realm.service'), 'Original Realm service\n')
+        old_unit = self.ctx.path('/etc/systemd/system/traffic-scheduler.service')
+        original_unit = '[Service]\nExecStart=/usr/bin/python3 /usr/local/bin/traffic-scheduler tick\nProtectSystem=strict\nReadWritePaths=/var/lib/traffic-scheduler\n'
+        atomic(old_unit, original_unit)
         account = types.SimpleNamespace(pw_uid=65534, pw_gid=65534)
         with patch.object(installer.pwd, 'getpwnam', return_value=account), \
                 patch.object(installer.grp, 'getgrnam', return_value=types.SimpleNamespace(gr_gid=65534)), \
@@ -497,8 +515,39 @@ class ToolkitTests(unittest.TestCase):
             installer.install(self.ctx, no_wizard=True)
         self.assertEqual(self.ctx.path('/usr/local/bin/pf').read_text(), original)
         self.assertEqual(self.ctx.path('/etc/systemd/system/realm.service').read_text(), 'Original Realm service\n')
+        self.assertEqual(old_unit.read_text(), original_unit)
+        dropin = self.ctx.path('/etc/systemd/system/traffic-scheduler.service.d/50-vps-toolkit.conf').read_text()
+        self.assertIn('ReadWritePaths=/var/lib/vps-toolkit/traffic', dropin)
+        self.assertNotIn('ExecStart=', dropin)
+        self.assertNotIn('ProtectSystem=', dropin)
         self.assertFalse(any(operation in argv for argv in self.runner.calls for operation in ('stop', 'start', 'restart', 'enable', 'disable')))
         self.assertFalse(read_json(self.ctx.config_path)['traffic']['enabled'])
+
+    @unittest.skipUnless(os.name == 'posix', 'installer uses POSIX accounts')
+    def test_installer_rolls_back_legacy_meter_dropin_if_reload_fails(self):
+        import types
+        base = Path(__file__).resolve().parents[1]
+        if not (base / 'MANIFEST.json').exists():
+            base = base.parent.parent / 'outputs/vps-toolkit'
+        spec = importlib.util.spec_from_file_location('toolkit_installer_rollback', base / 'install.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        atomic(self.ctx.path('/etc/systemd/system/traffic-scheduler.service'),
+               '[Service]\nExecStart=/usr/bin/python3 /usr/local/bin/traffic-scheduler tick\n')
+        before = self.ctx.config_path.read_bytes()
+        def fail_reload(argv, **kwargs):
+            if argv == ['systemctl', 'daemon-reload']:
+                raise Error('reload failed')
+            return self.runner(argv, **kwargs)
+        self.ctx.run = fail_reload
+        account = types.SimpleNamespace(pw_uid=65534, pw_gid=65534)
+        with patch.object(installer.pwd, 'getpwnam', return_value=account), \
+                patch.object(installer.grp, 'getgrnam', return_value=types.SimpleNamespace(gr_gid=65534)), \
+                patch.object(os, 'chown'), self.assertRaises(Error):
+            installer.install(self.ctx, no_wizard=True)
+        self.assertFalse(self.ctx.path('/etc/systemd/system/traffic-scheduler.service.d/50-vps-toolkit.conf').exists())
+        self.assertEqual(self.ctx.config_path.read_bytes(), before)
+        self.assertFalse(any(operation in argv for argv in self.runner.calls for operation in ('stop', 'start', 'restart', 'enable', 'disable')))
 
     def test_redaction_does_not_export_credentials(self):
         from vps_toolkit.core import redact

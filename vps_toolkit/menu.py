@@ -232,7 +232,8 @@ def download(ctx):
 
 def configure_quota(ctx):
     item = configuration(ctx)['traffic']
-    command = ['traffic', 'configure', '--strategy', 'quota']
+    print('仅修改补下载的预算上限与限速，保留当前模式：' + ('累计比例补下行' if item['strategy'] == 'ratio' else '固定额度') + '。\n')
+    command = ['traffic', 'configure']
     for flag, label, default in [('daily-gb', '每日补下载上限 GB', item['daily_bytes'] / 1e9),
                                  ('monthly-gb', '每月补下载上限 GB', item['monthly_bytes'] / 1e9),
                                  ('mbps', '速度上限 Mbps', item['mbps'])]:
@@ -240,17 +241,45 @@ def configure_quota(ctx):
     run(ctx, command)
 
 
+def configure_strategy(ctx):
+    choice = choose('切换下载模式', [('1', '固定额度：按预算随机分块下载'), ('2', '累计比例：仅补上行:下行缺口')])
+    if choice is None:
+        raise Back()
+    if choice == '2':
+        configure_ratio(ctx)
+    else:
+        run(ctx, ['traffic', 'configure', '--strategy', 'quota'])
+
+
 def configure_ratio(ctx):
+    from . import ratio, traffic
     item = configuration(ctx)['traffic']
+    while True:
+        supplied = ask('目标比例：上行:下行（0 返回）', item.get('ratio', '1:2'))
+        if supplied == '0':
+            raise Back()
+        try:
+            normalized = ratio.normalize(supplied)
+            break
+        except Error as exc:
+            print('输入有误：' + clean(exc) + '；可直接回车采用默认值，或输入 0 返回。')
     command = ['traffic', 'configure', '--strategy', 'ratio', '--ratio',
-               ask('目标比例：上行:下行', item.get('ratio', '1:2')),
+               normalized,
                '--ratio-interface', ask('计量出口网卡', item.get('ratio_interface', 'auto')),
                '--mbps', ask('补下载限速 Mbps', item['mbps'])]
     schedule = ask('调度：1 按分钟跟随 / 2 全天随机分散', '1' if item.get('ratio_schedule', 'follow') == 'follow' else '2')
     if schedule not in ('1', '2'):
         raise Error('调度请选择 1 或 2')
     command += ['--ratio-schedule', 'follow' if schedule == '1' else 'random']
-    run(ctx, command)
+    if run(ctx, command):
+        return
+    readiness = traffic.initialize_meter(ctx)
+    if readiness['status'] == 'unavailable' and readiness.get('manual_interface'):
+        print('\n无法自动读取整机流量：' + clean(readiness['note']))
+        interface = ask('请手动指定出口网卡（如 eth0；0 返回）', '0')
+        if interface == '0':
+            raise Back()
+        run(ctx, ['traffic', 'configure', '--ratio-interface', interface])
 
 
 def configure_time(ctx):
@@ -294,14 +323,15 @@ def traffic_menu(ctx):
                ('4', '解除暂停', lambda: run(ctx, ['traffic', 'resume'])),
                ('5', '停止当前下载', lambda: run(ctx, ['traffic', 'stop'])),
                ('6', '关闭自动任务', lambda: run(ctx, ['traffic', 'disable'])),
-               ('7', '固定额度与限速设置', lambda: configure_quota(ctx)),
+               ('7', '下载额度与限速（保留当前模式）', lambda: configure_quota(ctx)),
                ('8', '累计上下行比例设置', lambda: configure_ratio(ctx)),
-               ('9', '校准整机历史累计流量', lambda: ratio_seed(ctx)),
+               ('9', '补录 / 校准整机历史累计流量', lambda: ratio_seed(ctx)),
                ('10', '时间窗口与随机权重', lambda: configure_time(ctx)),
                ('11', '恢复指定下载任务', lambda: run(ctx, ['traffic', 'resume', '--job', ask('完整任务编号')])),
                ('12', '添加授权下载资源', lambda: resource(ctx)),
                ('13', '移除授权下载资源', lambda: resource(ctx, True)),
-               ('14', '实时下载进度（每秒刷新）', lambda: watch_progress(ctx))]
+               ('14', '实时下载进度（每秒刷新）', lambda: watch_progress(ctx)),
+               ('15', '切换下载模式（固定额度 / 累计比例）', lambda: configure_strategy(ctx))]
     submenu(ctx, '下载任务调度', entries)
 
 

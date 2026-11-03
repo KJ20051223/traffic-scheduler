@@ -5,7 +5,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from vps_toolkit import menu, progress, ratio, traffic
+from vps_toolkit import menu, presentation, progress, ratio, traffic
 from vps_toolkit.core import Context, defaults, read_json, save_config, write_json
 
 
@@ -50,6 +50,7 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(result['today_bytes'], 3_000_000)
         self.assertEqual(result['speed_mbps'], 4)
         self.assertEqual(result['eta_seconds'], 14)
+        self.assertEqual(result['task_remaining_bytes'], 7_000_000)
         self.assertEqual(read_json(path)['download']['bytes'], 2_000_000)
         self.assertEqual(read_json(path)['download']['reserved'], 2_000_000)
 
@@ -98,6 +99,45 @@ class ProgressTests(unittest.TestCase):
             menu.action_page(self.ctx, '实时下载进度', lambda: progress.watch(self.ctx))
         self.assertIn('每秒刷新', stdout.getvalue())
         self.assertEqual(stdout.getvalue().count('今日已结算'), 1)
+
+    def test_first_ratio_preview_reads_machine_totals_and_remaining_without_writing_baseline(self):
+        self.cfg['traffic'].update(strategy='ratio', daily_bytes=2_000_000_000)
+        save_config(self.ctx, self.cfg)
+        raw = {'boot': 'fixture', 'interfaces': {'eth0': {'tx': 5_000_000_000, 'rx': 6_000_000_000, 'index': 2}}}
+        before = sorted(str(p) for p in self.ctx.root.rglob('*'))
+        with patch.object(ratio, 'auto_interfaces', return_value=['eth0']), patch.object(ratio, 'snapshot', return_value=raw), patch.object(traffic.engine, 'locked', side_effect=AssertionError('must not lock')):
+            result = progress.snapshot(self.ctx, self.at)
+        machine = result['machine_traffic']
+        self.assertEqual(machine['upload_bytes'], 5_000_000_000)
+        self.assertEqual(machine['download_bytes'], 6_000_000_000)
+        self.assertEqual(machine['needed_bytes'], 4_000_000_000)
+        self.assertEqual(machine['fillable_now_bytes'], 2_000_000_000)
+        self.assertTrue(machine['limited_by_budget'])
+        self.assertFalse(machine['baseline_persisted'])
+        self.assertEqual(before, sorted(str(p) for p in self.ctx.root.rglob('*')))
+        output = io.StringIO()
+        with patch('sys.stdout', output):
+            presentation.render_progress(result)
+        self.assertIn('达到比例还需补下载（含容差）：4.000 GB', output.getvalue())
+        self.assertIn('当前预算内最多可补：2.000 GB', output.getvalue())
+
+    def test_ratio_satisfied_never_uses_remaining_budget_as_a_download_target(self):
+        self.cfg['traffic']['strategy'] = 'ratio'
+        save_config(self.ctx, self.cfg)
+        raw = {'boot': 'fixture', 'interfaces': {'eth0': {'tx': 5_000_000_000, 'rx': 11_000_000_000, 'index': 2}}}
+        with patch.object(ratio, 'auto_interfaces', return_value=['eth0']), patch.object(ratio, 'snapshot', return_value=raw):
+            result = progress.snapshot(self.ctx, self.at)
+        self.assertGreater(result['remaining_bytes'], 0)
+        self.assertEqual(result['machine_traffic']['needed_bytes'], 0)
+        self.assertEqual(result['machine_traffic']['fillable_now_bytes'], 0)
+
+    def test_machine_read_failure_reports_error_and_never_invents_totals(self):
+        self.cfg['traffic']['strategy'] = 'ratio'
+        save_config(self.ctx, self.cfg)
+        with patch.object(ratio, 'auto_interfaces', side_effect=traffic.Error('无法识别出口网卡')):
+            result = progress.snapshot(self.ctx, self.at)
+        self.assertNotIn('upload_bytes', result['machine_traffic'])
+        self.assertIn('无法识别出口网卡', result['machine_traffic']['note'])
 
     def test_progress_display_failure_does_not_abort_transfer_writer(self):
         writer = progress.reporter(self.directory, self.data)

@@ -281,7 +281,10 @@ def traffic_dispatch(ctx, args):
                 except Error:
                     pass
     save_config(ctx, config)
-    return {'saved': str(ctx.config_path), 'traffic': item, 'existing_daily_counts_preserved': True}
+    result = {'saved': str(ctx.config_path), 'traffic': item, 'existing_daily_counts_preserved': True}
+    if action == 'configure' and item['strategy'] == 'ratio':
+        result['machine_initialization'] = traffic.initialize_meter(ctx, item)
+    return result
 
 
 def dispatch(ctx, args):

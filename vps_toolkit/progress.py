@@ -57,7 +57,12 @@ def ratio_preview(ctx, item):
     from . import ratio
     state = read_json(ratio.state_path(ctx))
     if state is None:
-        return {'note': '累计比例尚未建立计量基线；请先查看一次流量统计或运行任务'}
+        selected = ratio.auto_interfaces(ctx) if item['ratio_interface'] == 'auto' else ratio.names(item['ratio_interface'])
+        current = ratio.snapshot(ctx, selected)
+        result = ratio.view(item, ratio.initial_state(item, current, time.time()))
+        result.update(baseline_persisted=False,
+                      note='当前开机网卡累计值的只读预览；基线将在下载空闲时自动保存。重启前历史无法自动恢复，可通过累计流量校准补录。')
+        return result
     ratio.check_state(state)
     if state['selector'] != item['ratio_interface']:
         raise Error('计量网卡已更改，请校准后继续')
@@ -69,7 +74,9 @@ def ratio_preview(ctx, item):
         for key in ('rx', 'tx'):
             projected[key] += values[key] if reset or values[key] < old[key] else values[key] - old[key]
     projected['sampled_at'] = time.time()
-    return ratio.view(item, projected)
+    result = ratio.view(item, projected)
+    result['baseline_persisted'] = True
+    return result
 
 
 def snapshot(ctx, at=None):
@@ -96,20 +103,24 @@ def snapshot(ctx, at=None):
     today = data['download']['bytes']
     if active and live.get('ledger_date') == data['date']:
         today = max(today, live.get('today_live_bytes', today))
+    budget = max(0, min(traffic.remaining(item, directory, data), item['daily_bytes'] - today))
     result = dict(progress_view=True, time=current.isoformat(), active=active,
                   status=live.get('status', 'idle') if active else (job or {}).get('status', 'idle'),
                   entry=live.get('entry', '暂无当前下载'), id=identifier, received_bytes=amount,
                   requested_bytes=total, percent=min(100, amount * 100 / total) if total else None,
+                  task_remaining_bytes=max(0, total - amount) if total else None,
                   speed_mbps=speed * 8 / 1e6, configured_mbps=traffic.effective_rate(item),
                   eta_seconds=max(0, (total - amount) / speed) if total and speed else None,
                   today_bytes=today, today_settled_bytes=data['download']['bytes'],
-                  daily_limit_bytes=item['daily_bytes'], remaining_bytes=traffic.remaining(item, directory, data),
+                  daily_limit_bytes=item['daily_bytes'], remaining_bytes=budget,
                   paused=item['paused'], enabled=item['enabled'], strategy=item['strategy'],
                   update_age_seconds=round(age, 1) if live else None,
                   note='每秒刷新；实时已接收量尚待当前分块结算，最终配额以已结算字节为准。')
     if item['strategy'] == 'ratio':
         try:
             result['machine_traffic'] = ratio_preview(ctx, item)
+            result['machine_traffic']['fillable_now_bytes'] = min(result['machine_traffic']['needed_bytes'], budget)
+            result['machine_traffic']['limited_by_budget'] = result['machine_traffic']['needed_bytes'] > budget
         except (Error, OSError) as exc:
             result['machine_traffic'] = {'note': str(exc)}
     return result
@@ -118,10 +129,16 @@ def snapshot(ctx, at=None):
 def watch(ctx):
     from .menu import screen
     from .presentation import render_progress
+    from .traffic import initialize_meter
+    initialize_meter(ctx)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         render_progress(snapshot(ctx))
         return
+    initialize_after = time.monotonic() + 5
     while True:
+        if time.monotonic() >= initialize_after:
+            initialize_meter(ctx)
+            initialize_after = time.monotonic() + 5
         screen('实时下载进度')
         try:
             render_progress(snapshot(ctx))
