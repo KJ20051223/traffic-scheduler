@@ -76,9 +76,10 @@ def _restore(ctx, archive, dry_run=True, confirmation=None):
                 incoming = json.loads(data)
                 current = read_json(destination)
                 # Restoring configuration must never roll back traffic already spent.
+                incoming_spent = incoming['download']['bytes'] + incoming['download'].get('reserved', 0)
                 for key in ('bytes', 'confirmed'):
                     incoming['download'][key] = max(incoming['download'][key], current['download'][key])
-                incoming['download']['bytes'] = max(incoming['download']['bytes'], current['download']['bytes'] + current['download'].get('reserved', 0))
+                incoming['download']['bytes'] = max(incoming_spent, current['download']['bytes'] + current['download'].get('reserved', 0))
                 incoming['download']['reserved'] = 0
                 data = (json.dumps(incoming, ensure_ascii=False, indent=2) + '\n').encode()
             prepared[entry.name] = data

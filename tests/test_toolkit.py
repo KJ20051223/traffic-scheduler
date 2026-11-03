@@ -306,6 +306,17 @@ class ToolkitTests(unittest.TestCase):
                 bundle.addfile(entry, io.BytesIO(content))
         with self.assertRaises(Error):
             backup.restore(self.ctx, path)
+
+    def test_restore_counts_unsettled_bytes_from_backup(self):
+        quota = self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-03.json')
+        state = traffic.engine.new_day('2026-11-03')
+        state['download'].update(bytes=20, reserved=17)
+        write_json(quota, state)
+        archive = backup.create(self.ctx)['archive']
+        state['download'].update(bytes=10, reserved=0)
+        write_json(quota, state)
+        backup.restore(self.ctx, archive, dry_run=False, confirmation='restore')
+        self.assertEqual(read_json(quota)['download']['bytes'], 37)
     def test_offline_download_checks_hash_and_rejects_html(self):
         source = Path(self.temp.name) / 'source'
         target = Path(self.temp.name) / 'target'
@@ -339,6 +350,18 @@ class ToolkitTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main(['traffic', 'enable'], self.ctx), 1)
         self.assertFalse(any('stop' in x or 'disable' in x for x in self.runner.calls))
+
+    def test_new_timer_activation_failure_preserves_old_running_task(self):
+        def broken_start(argv, **kwargs):
+            if argv == ['systemctl', 'start', 'vps-toolkit-traffic.timer']:
+                raise Error('simulated new timer failure')
+            return self.runner(argv, **kwargs)
+        self.ctx.run = broken_start
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(['traffic', 'enable', '--replace-legacy'], self.ctx), 1)
+        self.assertFalse(read_json(self.ctx.config_path)['traffic']['enabled'])
+        self.assertNotIn(['systemctl', 'stop', 'traffic-scheduler.timer'], self.runner.calls)
+        self.assertNotIn(['systemctl', 'disable', 'traffic-scheduler.timer'], self.runner.calls)
 
     def test_corrupt_monthly_record_fails_closed(self):
         atomic(self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-01.json'), '{broken')

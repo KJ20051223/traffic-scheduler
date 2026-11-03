@@ -124,6 +124,39 @@ def download_child(ctx, args):
     return None
 
 
+def enable_traffic(ctx, config, replace_legacy=False):
+    init = detect(ctx)['init']
+    if init not in ('systemd', 'openrc'):
+        raise Error('没有可用的 systemd/OpenRC，配置与原任务状态保持不变')
+    old = 'traffic-scheduler.timer' if init == 'systemd' else 'traffic-scheduler'
+    new = 'vps-toolkit-traffic.timer' if init == 'systemd' else 'vps-toolkit-traffic'
+    snapshots = {name: {state: service(ctx, name, state).returncode == 0
+                        for state in ('is-enabled', 'is-active')} for name in (old, new)}
+    if any(snapshots[old].values()) and not replace_legacy:
+        raise Error('原定时任务仍启用或运行，已保留其状态；确认替换时使用 --replace-legacy')
+    previous = json.loads(json.dumps(config))
+    config['traffic']['enabled'] = True
+    activated = False
+    try:
+        save_config(ctx, config)
+        # Keep the old scheduler alive until the new timer is successfully activated.
+        service(ctx, new, 'enable', check=True)
+        service(ctx, new, 'start', check=True)
+        activated = True
+        if any(snapshots[old].values()):
+            service(ctx, old, 'stop', check=True)
+            service(ctx, old, 'disable', check=True)
+    except Exception:
+        save_config(ctx, previous)
+        for name in (new, old) if activated else (new,):
+            for state, yes, no in [('is-enabled', 'enable', 'disable'), ('is-active', 'start', 'stop')]:
+                try:
+                    service(ctx, name, yes if snapshots[name][state] else no)
+                except Error:
+                    pass
+        raise
+
+
 def traffic_dispatch(ctx, args):
     action = args.action
     if action == 'status':
@@ -188,17 +221,8 @@ def traffic_dispatch(ctx, args):
         if action == 'enable':
             if not item['authorized_urls']:
                 raise Error('自动下载默认关闭，启用前必须先授权测试 URL')
-            try:
-                old_name = 'traffic-scheduler.timer' if detect(ctx)['init'] == 'systemd' else 'traffic-scheduler'
-                old_enabled = service(ctx, old_name, 'is-enabled').returncode == 0
-            except Error:
-                old_enabled = False
-            if old_enabled and not args.replace_legacy:
-                raise Error('原定时任务仍启用，已保留其状态；确认替换时使用 --replace-legacy')
-            if old_enabled:
-                service(ctx, old_name, 'disable', check=True)
-                service(ctx, old_name, 'stop', check=True)
-            item['enabled'] = True
+            enable_traffic(ctx, config, args.replace_legacy)
+            return {'saved': str(ctx.config_path), 'traffic': item, 'existing_daily_counts_preserved': True}
         else:
             item['enabled'] = False
             names = ('vps-toolkit-traffic.timer', 'traffic-scheduler.timer') if detect(ctx)['init'] == 'systemd' else ('vps-toolkit-traffic', 'traffic-scheduler')
@@ -209,11 +233,6 @@ def traffic_dispatch(ctx, args):
                 except Error:
                     pass
     save_config(ctx, config)
-    if action == 'enable':
-        init = detect(ctx)['init']
-        name = 'vps-toolkit-traffic.timer' if init == 'systemd' else 'vps-toolkit-traffic'
-        service(ctx, name, 'enable', check=True)
-        service(ctx, name, 'start', check=True)
     return {'saved': str(ctx.config_path), 'traffic': item, 'existing_daily_counts_preserved': True}
 
 
