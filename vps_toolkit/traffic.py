@@ -215,6 +215,9 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
         pacer = engine.Pacer(rate)
         retries = 0
         started = time.monotonic()
+        if at is None:
+            next_day = current.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
+            runtime = min(runtime, max(0.001, next_day.timestamp() - time.time()))
         try:
             with engine.deadline(runtime):
                 while offset < amount:

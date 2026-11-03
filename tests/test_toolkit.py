@@ -410,6 +410,19 @@ class ToolkitTests(unittest.TestCase):
             self.assertEqual(traffic.engine.now(), clock)
             get_time.assert_called_once_with('system')
 
+    def test_manual_runtime_is_cut_off_at_calendar_boundary(self):
+        late = self.at.replace(hour=23, minute=59, second=58)
+        observed = []
+        @contextlib.contextmanager
+        def deadline(seconds):
+            observed.append(seconds)
+            yield
+        with patch.object(traffic, 'moment', return_value=late), patch.object(traffic.time, 'time', return_value=late.timestamp()), \
+                patch.object(traffic.engine, 'deadline', side_effect=deadline), patch.object(traffic.engine, 'Pacer', NoPacer):
+            result = traffic.download(self.ctx, size=17, network=LocalNetwork(self.server))
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(observed, [2])
+
     @unittest.skipUnless(os.name == 'posix', 'installer uses POSIX accounts')
     def test_install_disk_full_refuses_before_replacing_commands(self):
         import types

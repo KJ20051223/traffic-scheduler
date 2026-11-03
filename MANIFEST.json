@@ -20,5 +20,5 @@
   "vps_toolkit/maintenance.py": "90dd4ffb1a9118e667c5e8e4ba132304c5089f7f37543d9fab87ae0dd2a80bab",
   "vps_toolkit/network.py": "113aa7f94fd8bdc4a393237ed9a1f7a4c7a0adbb91717d45e3c446fe085af787",
   "vps_toolkit/platform.py": "8b3c0ca22b1b187ad2dbc39012f3bf85643310ac31895b9dd7b35ea8e085d0eb",
-  "vps_toolkit/traffic.py": "ce9d3098db81dd559b3953bf1bf4c2655e1d3eacc1165882cfcc3c77f28afa74"
+  "vps_toolkit/traffic.py": "bb03789e70cd916f70fe269a5bb03f5ded763ecb13797ef4c5cd2a022d5f7f3b"
 }

@@ -125,6 +125,8 @@ sudo vps-toolkit agent remove barad --official-script /可信路径/官方卸载
 
 cloud-init 先 `agent remove cloud-init --dry-run` 查看依赖模拟与持久网络文件；必须独立确认网络/SSH 持久化，并同时传 `--confirm-network-independent --confirm cloud-init` 才允许包管理器官方卸载。备份网络文件，保留 `50-cloud-init.yaml`，不重启网络。APK 等未实现安全卸载模拟的系统仅审计 cloud-init。
 
+恢复主动卸载的官方组件时，按审计结果中的 `official_document` / 卸载结果中的 `reinstall` 链接，在对应云控制台选择该实例重新安装官方 Agent，再运行 `agent audit` 核对服务与最近心跳；不要混用其他厂商的安装器。cloud-init 可用本发行版包管理器重新安装，并先人工检查备份网络配置，不自动重建网络或重启 SSH。
+
 官方依据与边界见 [审计记录](docs/AUDIT.md)。客户机 Agent、云平台网络、虚拟化宿主机、物理基础设施、控制平面是不同层；本工具只管理客户机组件，控制台展示与客户机状态可能不同。
 
 ## 备份、更新和恢复
