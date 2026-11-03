@@ -152,4 +152,6 @@ sudo vps-toolkit uninstall --confirm uninstall
 
 [兼容与验收矩阵](docs/COMPATIBILITY.md) 区分发行版容器回归、真实 Realm TCP/UDP 验证与尚未完成的云主机验收。[GitHub Actions](https://github.com/KJ20051223/vps-toolkit/actions) 保存每次提交的实际结果。不得将容器通过解释为 Agent 真机卸载、重启网络或云控制台验收通过。
 
+[架构与模块](docs/ARCHITECTURE.md) · [测试记录与安装器摘要](docs/TESTING.md) · [恢复指南](docs/RECOVERY.md)。
+
 MIT；沿用原 traffic-scheduler 计量、限速、来源健康与调度引擎；对 realm-xwPF 的审查、许可和独立兼容实现见审计文档。
