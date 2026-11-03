@@ -10,6 +10,8 @@ Shell 安装器与 OpenRC 服务语法已检查；运行时文件用 Python 3.8 
 
 Linux 全量结果和对应工作流见 [Actions](https://github.com/KJ20051223/vps-toolkit/actions)。每个发行版任务实际运行单文件安装、读取默认关闭的配置、运行同一套回归测试，再进行离线重装。Realm 在原生 x86_64 / ARM64 runner 上验证官方 SHA256、ELF、版本并真实转发 TCP/UDP 回环数据。
 
+2026-11-03 最终工作流 [41621243738](https://github.com/KJ20051223/vps-toolkit/actions/runs/41621243738) 的 **19 个任务全部通过**：Linux 单元测试、16 个发行版容器、2 个原生架构 Realm 实际 TCP/UDP 测试。平台包括 Ubuntu 20.04/22.04/24.04、Debian 11/12/13、Alpine 3.20/3.23、Rocky 8/9、AlmaLinux 10、CentOS Stream 9/10、Fedora 44、TencentOS 4、Alibaba Cloud Linux 3。发行版回归运行 88 项测试，Linux 未使用 Windows 的 POSIX 跳过条件。
+
 未验收项目：完整云主机开机/重启、systemd/OpenRC 真正开机自启、真实云安全客户端自保护/验证码卸载、官方控制台状态同步、云网络持久性、全天长期公网文件下载。测试不卸载正在使用的真实安全产品，不修改 SSH、防火墙或安全组。
 
 Debian 11 默认源的 bullseye-security 包实测 404，测试容器单独使用官方归档源；正式安装器不自动改源。AlmaLinux 8/9、Rocky 10、TencentOS 3、openEuler、Anolis、SUSE、Arch 的本轮验收边界见兼容矩阵，不按其他系统的通过结果推定这些系统已经验收。
