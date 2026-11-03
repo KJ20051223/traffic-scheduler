@@ -1,192 +1,153 @@
-# Traffic Scheduler 2.3.0
+# VPS Toolkit
 
-Linux **仅下行**流量调度：每天按北京时间随机分散下载，默认 **20 GB/天、5 Mbps、中国大陆**。额度、速度、地区和自定义下载地址均可设置。已移除上传任务、上传节点和方向选择。
+Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.0.0**。
 
-## 安装或升级
+**升级保留已有下载任务的启停状态、原配置、当日统计与运行中的 Realm；新自动下载任务默认关闭。** 不修改 SSH、防火墙、安全组、系统 Python 或 libc，不新增网站、TLS 监听或远程管理端口。HTTPS 仅作为下载客户端使用。
 
-适用于运行 **systemd 239+** 的以下 Linux 系统，安装器自动安装依赖并选择 **Python 3.8+**。已有安装直接覆盖升级，无需卸载，保留配置及当天计数。
+## 安装与升级
 
-| 系统 | 版本范围 | 包管理器 |
-| --- | --- | --- |
-| Ubuntu | 20.04+ | apt |
-| Debian | 12+ | apt |
-| RHEL、Rocky、AlmaLinux、Oracle Linux | 8+，软件源需提供 Python 3.8+ | dnf / yum |
-| CentOS Stream | 9+ | dnf |
-| Fedora | 40+ | dnf |
-| Amazon Linux | 2023 | dnf |
-| openSUSE | Leap 15.6+、Tumbleweed / Slowroll | zypper |
-| Arch Linux | 滚动发行版，系统已正常更新 | pacman |
+联网服务器执行同一条命令安装或升级，已有任务不会被重新启用、停止或清零：
 
-Linux Mint、Manjaro 等衍生系统会根据 `/etc/os-release` 的 `ID_LIKE` 选择相应安装方式，仍会检查实际工具和解释器。Alpine 默认 OpenRC、Debian 11 及以前、CentOS 7/8、Amazon Linux 2、未运行 systemd 的普通容器、Windows/macOS 不在当前支持范围。
-
-系统自带的软件源必须可用，安装器不会修改软件源、关闭 SELinux、升级整个系统或替换 `/usr/bin/python3`。RHEL 8 等默认 Python 较旧的系统会尝试安装独立的 Python 3.12 / 3.11 / 3.9；CLI、安装实测和 systemd 使用同一选定解释器。Arch 不执行 `pacman -Sy` 部分升级，软件源失效时提示用户先完成系统更新。
-
-下面明确设置 **每日下行 20 GB、最高 5 Mbps、大陆内置源**；把 `20` 和 `5` 改成需要的数字：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KJ20051223/traffic-scheduler/main/install.sh -o install-traffic-scheduler.sh && sudo bash install-traffic-scheduler.sh --gb 20 --mbps 5 --region cn --builtin
+```sh
+curl -fL --retry 3 --connect-timeout 10 https://raw.githubusercontent.com/KJ20051223/vps-toolkit/main/install.sh -o install-vps-toolkit.sh && sudo sh install-vps-toolkit.sh
 ```
 
-不带参数则交互设置，仅询问下行 GB、Mbps、地区和下载 URL：
+国内服务器无法访问 GitHub 时，在本地下载仓库中的 [install.sh](install.sh)，**只上传这一个文件**，无需上传压缩包：
 
-```bash
-sudo bash install-traffic-scheduler.sh
+```sh
+sudo sh ./install.sh
+# 非交互安装，跳过向导：
+sudo sh ./install.sh --no-wizard
+# 已安装 Python 3.8+、CA、tzdata、bash、util-linux、账户管理工具时，可完全离线安装：
+sudo sh ./install.sh --offline --no-wizard
 ```
 
-没有 curl 时，可先按系统安装：Debian/Ubuntu 使用 `apt-get update && apt-get install -y curl`；RPM 系使用 `dnf install -y curl`；openSUSE 使用 `zypper install curl`；Arch 使用 `pacman -S --needed curl`。以上软件安装命令须 root 或 sudo 权限。也可直接使用下面的手动上传方式。安装仍需系统软件源提供 Python、证书、时区及用户管理工具。
+单文件包含工具代码，并在解包前验证嵌入载荷 SHA256。Realm 二进制另行按官方固定版本、可信 SHA256 验证后安装；支持离线包。镜像站的测试文件不包含在安装包中。
 
-### 手动上传服务器
-
-下载仓库里的 **[install.sh](https://raw.githubusercontent.com/KJ20051223/traffic-scheduler/main/install.sh)**，上传服务器，在该目录执行：
-
-```bash
-sudo bash install.sh --gb 20 --mbps 5 --region cn --builtin
+```sh
+sudo vps-toolkit          # 中文菜单
+sudo vps-toolkit wizard   # 健康检查 → Agent 审计 → 可选模块 → 手动实测 → 可选调度 → 备份
+sudo vps-toolkit health
+sudo vps-toolkit cloud show
 ```
 
-SH 内嵌完整程序，**只上传这一个文件即可**，不需要压缩包或单独上传 Python。
+## 手动下载：保留，且与自动任务共享预算
 
-### 配置生效与旧版迁移
+先填写你有权测试的文件 URL。默认新配置没有授权资源，不能自动下载。旧安装会继承旧资源授权，不改变原任务状态。
 
-- 安装器停止旧任务，写入 `/etc/traffic-scheduler/config.json`，保存后回读显示实际 GB、Mbps、地区。
-- 安装实测和 systemd 服务明确读取同一配置路径；任务日志也打印实际额度和限速。
-- 用刚保存的限速和地区进行 **10 MB 真实下载**，成功后才启用 timer；失败保持停用。交互安装可重新设置或重试。
-- 保留当天已计量的下行进度。降低额度到已下载量以下时，当天停止继续下载。
-- `--defaults` 保留已有参数并迁移为仅下行；首次安装才使用默认 20 GB、5 Mbps。要覆盖旧参数，请明确传 `--gb` 和 `--mbps`。
-- 从 2.0.x 升级：已启用下行则保留下行参数；原来仅上行则把**当时启用的额度、速度、地区**迁移到下行，上传 URL 改为对应地区内置下载源。不会把闲置下行的 20 GB/10 Mbps 当成原设置。
-
-## 下载文件会自动删除吗？
-
-**会，不会留下完整 ISO 或不断积累文件。** 每次最多请求 **2 MiB**，写入 Linux 匿名临时文件。文件创建时就没有目录链接，正常完成、失败或中断时关闭；进程被强制结束时也由内核回收。
-
-首次 10 MB 实测分块执行，测试目录在结束或异常退出时清理。断电或强杀即便留下测试状态目录，也没有可见下载内容。配置、计量 JSON 和日志是运行记录，不是下载文件。
-
-Linux CI 检查正常完成、部分失败和中断后的清理，还检查**下载进行中临时文件链接数为 0**。
-
-## 内置目标
-
-| 区域 | 内置源 | 下载内容 |
-| --- | --- | --- |
-| 大陆 `cn` | 南京大学、中科大、清华、北外、浙大、中科院软件所（6 个） | Ubuntu Server ISO 的部分字节，不安装、不执行 |
-| 海外 `overseas`（含港澳台） | Cloudflare Speed Test | 测速用二进制数据 |
-
-先前失败的华科、用户收到 418/403 的华为云地址和所有上传节点均已移除。华为云开发端偶尔仍可用，用户端失败的确切原因尚未确认，不能把同一运营商的两个域名视作独立备份。阿里云官方镜像目录公告暂停公网 ISO 下载，也未加入列表。
-
-### 每次随机选择与自动重试
-
-- 每次真实测试、每个调度时段都重新打乱全部候选的顺序，从可用候选中随机开始；本次源能正常下载就继续用它。下一时段重新随机，随机结果允许重复。
-- 第一个失败后自动切换其他候选，不要求先把所有源逐个测试一遍；都保持同样的地区校验和限速。
-- 超时、连接重置/断连、HTTP 408/425/429/5xx 等临时错误，每源每时段最多尝试 **3 次**（含首次），受时段截止和剩余额度限制。优先换源；再次尝试前分别等待约 **2 秒、5 秒**，加最多 1 秒随机间隔。
-- 重试耗尽后该源冷却 **5 分钟**；403、418 等明确拒绝不会当场连续重试，而是跳过并冷却 **30 分钟**。
-- 尊重 `Retry-After` 秒数或 HTTP 日期；等待超过 15 秒时留到后续时段尝试，不占住当前任务长期等待。
-- 冷却状态保存到 `/var/lib/traffic-scheduler/source-health.json`，后续进程继续使用。全部不可用时记录错误；运行中的 timer 后续随机时段会再尝试。**首次安装实测失败仍保持 timer 停用，需要实测成功后再启用**，不会自行跳过验证。
-
-开发端对这 6 个源各进行了 64 KiB Range 探测和 10 MB / 5 Mbps 下载实测；实际 IP 均查询为 CN。开发端通过不代表所有来源均可访问，也未验证长期 20 GB。你的服务器会重新随机选源实测。
-
-大陆只连接查询归属为 CN 的公网 IPv4；海外只允许非 CN。连接固定到已校验 IP，保留 HTTPS 证书校验，重定向重新校验地区，不跨区域回退。归属缓存 24 小时，地理库可能有误差，不能保证路由或机房位置。
-
-公网数据连接不使用代理环境变量。系统 DNS 返回假 IP 时尝试 HTTPS DNS，不改系统 DNS。公共源可能限制来源或长期流量，首次安装会在你的服务器实测，不能保证持续可用。
-
-自定义目标应是可访问的二进制文件 URL，可交互输入或：
-
-```bash
-sudo bash install-traffic-scheduler.sh --gb 12 --mbps 3 --region cn --url 'https://你的域名/文件.bin'
+```sh
+sudo vps-toolkit traffic configure --daily-gb 10 --monthly-gb 300 --task-gb 0.1 --mbps 5 --max-runtime 300
+sudo vps-toolkit traffic authorize 'https://你的已授权文件地址/large-file.bin'
+sudo vps-toolkit traffic download --url 'https://你的已授权文件地址/large-file.bin' --mb 10
+sudo vps-toolkit traffic status
 ```
 
-更换地区清除旧地区自定义地址；显式指定 `--url` 使用新地址，`--builtin` 恢复内置源，两者不能同时使用。
+`traffic test` 是 `traffic download` 的别名，默认 10 MB。可加 `--mbps 2 --max-runtime 120`，只能进一步降低配置上限；可加 `--sha256 完整摘要` 校验本次逻辑下载内容。URL 必须属于配置地区（默认大陆），可 `traffic configure --region overseas` 切换海外。
 
-## 随机时间与计量
+**下载内容流式读取，逐块计量并自动清理临时内容，不保存完整文件。** 正常完成、失败和中断都会执行清理；磁盘只保留配置、计量和任务状态。多块请求使用连续偏移，不反复读取文件开头；恢复需要源站支持 Range。HTTP 403/418、TLS 错误会明确报错，临时网络错误最多重试 3 次，不无限重试。没有承诺任何公共镜像全天可用。
 
-- 按北京时间日期计量，不改系统时区。根据每日额度、设置速度和实测速率，把剩余流量拆成多个有明确字节额度的小块，再按小时权重随机分配到当天不同分钟；保存计划，重启不会重新抽签。
-- 每块按约 40 秒有效传输时间规划：5 Mbps、10 GB 约为 **400 块 × 25 MB**，20 GB 约为 800 块。各块字节数合计恰好等于当天剩余额度；每块完成即暂停，不提前消耗后续小块额度。
-- 零点只生成新日期的计量和计划。每天随机选 00:10–01:00 之间的起始门槛，门槛之前不安排下载，实际首个随机小块可能更晚；这不是固定启动时刻，重启、补量也不会绕过门槛。
-- 每个小块独立随机等待 0–5 秒后开始，最多到该分钟约第 52 秒。任务与手动测试共用锁，避免重叠；首次/手动实测不受每日排程限制。
-- 中断、失败或错过时段后，把未完成字节重新分摊到后续小块；变慢时按相同权重补选时段。不会在计划外直接连跑，剩余时间确实不足时可能用上所有剩余分钟。
-- 午夜结束当日任务，次日重新随机。更新计划版本、修改参数和重启均不清零当天计量。安装当日剩余时间不足、网络慢或源不可用，不能保证刷足，进度不会虚报。
-- 20 GB 在 5 Mbps 下理论至少需 **8 小时 53 分 20 秒**有效传输。理论时间超过 16.8 小时/天会拒绝配置，给间隔和连接留余量。
-
-### 小时权重
-
-默认 `estimated` 是可调整的作息估算，**没有使用真实用户的上传记录**。凌晨概率较低，白天和晚间较高；具体分钟每天重新随机。以下权重按北京时间，数值越大越容易被抽到，不代表固定下载份额或保证每小时都有下载；额度很大时部分时段可能全部被选中。
-
-| 小时 | 对应权重（顺序逐小时） |
-|---|---|
-| 00–05 | 0.4, 0.25, 0.15, 0.1, 0.1, 0.15 |
-| 06–11 | 0.35, 0.6, 0.9, 1.2, 1.4, 1.3 |
-| 12–17 | 1.0, 1.0, 1.4, 1.5, 1.4, 1.2 |
-| 18–23 | 1.0, 1.2, 1.5, 1.6, 1.2, 0.8 |
-
-```bash
-# 10 GB/天、5 Mbps，按默认估算权重随机分块；保留当天已下载量
-sudo bash install-traffic-scheduler.sh --gb 10 --mbps 5 --region cn --builtin --hourly-weights estimated
-
-# 所有小时权重相同，仍保留随机起始门槛和小块额度
-sudo bash install-traffic-scheduler.sh --defaults --hourly-weights uniform
-
-# 自定义北京时间 0–23 点的 24 个正数；不改变已有每日额度和速度
-sudo bash install-traffic-scheduler.sh --defaults --hourly-weights '0.4,0.25,0.15,0.1,0.1,0.15,0.35,0.6,0.9,1.2,1.4,1.3,1,1,1.4,1.5,1.4,1.2,1,1.2,1.5,1.6,1.2,0.8'
+```sh
+sudo vps-toolkit traffic pause        # 暂停；在当前有限大小请求结束后生效
+sudo vps-toolkit traffic resume       # 解除暂停
+sudo vps-toolkit traffic stop         # 停止当前任务，不停止 Realm
+sudo vps-toolkit traffic resume --job 任务编号  # 继续暂停/停止/中断任务的偏移
 ```
 
-每个权重须大于 0、不超过 1000000；可以将不活跃小时设为很小的正数。交互配置也可输入 `estimated`、`uniform` 或 24 个逗号分隔的数，回车保留当前权重。`status` 显示实际权重、当日小块数量、下次时段和下个小块额度。小时权重不改变每日总额度或下载限速，也不表示下载方向变成了上传。
+流量按 GB=10^9 字节、Mbps=10^6 比特/秒计量。所有新手动、新调度和受管理的兼容旧任务共用文件锁及每日/月预算；异常未结算预留按已消耗处理。协议开销、重传和其他应用流量不在有效负载统计中。要求完整 SHA256 的中断任务不能无文件恢复，需重新开始。
 
-1 GB=10^9 字节，1 MB=10^6 字节，1 Mbps=125,000 字节/秒。限速控制有效负载读取节奏，受 TCP 缓冲影响，**不等于网卡瞬时峰值保证**。TCP/TLS/HTTP 开销、ACK、重传、DNS/IP 查询不包含在额度内；仅下行也有必要请求和 ACK 上行。
+## 定时下载与修改规则
 
-失败中已收到的有效负载也计入额度，完整确认量另外显示。崩溃时未结算预留最多 2 MiB 保守计入，避免重启超额。首次/手动实测额外计量，不扣正式额度，换源可能增加测试用量。修改配置不会清零当天计数。
+只修改预算不会改变任务启停，也不会清空今日统计：
 
-## 日常命令
-
-```bash
-# 实际配置和今日进度
-sudo traffic-scheduler status
-traffic-scheduler --version
-
-# 所有当前目标、冷却剩余时间及上次错误
-sudo traffic-scheduler sources
-
-# 随时真实下载 10 MB，使用保存的限速和地区，内容自动清理
-sudo -u traffic-scheduler traffic-scheduler test --mb 10
-
-# 日志与每分钟检查时间
-sudo journalctl -u traffic-scheduler.service -n 80 --no-pager
-systemctl list-timers traffic-scheduler.timer
-
-# 停用，包括正在执行的下载
-sudo systemctl disable --now traffic-scheduler.timer
-sudo systemctl stop traffic-scheduler.service
+```sh
+sudo vps-toolkit traffic configure --daily-gb 10 --monthly-gb 300 --mbps 5 --hourly-weights estimated
+sudo vps-toolkit traffic configure --window 00:00-23:59 --times ''
+sudo vps-toolkit traffic enable
 ```
 
-修改推荐重新运行安装器，明确传参数，它会停止任务、保存、实测再激活。已安装 2.3.0 也可：
+旧 traffic-scheduler 仍启用时，`enable` 会提示先确认替换；明确迁移用 `traffic enable --replace-legacy`，这才会停止旧定时入口并启用新入口。也可以继续保留旧任务，使用原 `traffic-scheduler` 命令独立操作；新统一预算和更低速度上限同时约束兼容旧任务。统一工具的自动任务仍保持关闭，避免双份调度。
 
-```bash
-sudo systemctl disable --now traffic-scheduler.timer
-sudo systemctl stop traffic-scheduler.service
-sudo traffic-scheduler configure --gb 12 --mbps 3 --region cn --builtin && sudo -u traffic-scheduler traffic-scheduler test --mb 10 && sudo systemctl enable --now traffic-scheduler.timer
+默认随机分散，按速率与任务预算切块，每分钟最多一次、单次约 40 秒工作量；午夜有随机等待，错过的时段会在剩余窗口重新安排。`estimated` 为可调整的作息估算权重，**不是实测真实用户行为**。新配置默认均匀权重、系统时区；旧配置保留北京时间和权重。已有统计时禁止直接改日期时区，避免重复额度。
+
+```sh
+# 固定时间（替代随机时间）
+sudo vps-toolkit traffic configure --times 09:20,13:45,20:10
+# 恢复随机；或 --hourly-weights 后传逗号分隔的 24 个正数
+sudo vps-toolkit traffic configure --times '' --hourly-weights uniform
+# 假定链路 10 Mbps，为 Realm 留出至少 4 Mbps 的下载额度空间：
+sudo vps-toolkit traffic configure --link-mbps 10 --reserve-mbps 4 --mbps 8
+sudo vps-toolkit traffic disable
 ```
 
-不传参数的 `traffic-scheduler configure` 为交互设置。改变后必须重新实测，未经验证的配置无法调度；不要删除当天 `quota-YYYY-MM-DD.json` 来修改设置。
+预留通过限制本工具下载速率实现，不是系统 QoS；不会修改 tc/防火墙或保证外部程序带宽。实际下载并发恒为 **1**，`--max-concurrency` 只设上限，不会启动多个抢占共享预算的下载。默认每任务 100 MB、最长 300 秒、每日 20 GB、每月 600 GB、5 Mbps。低速、窄窗口、资源故障或大额度可能导致当日无法完成，预算是上限，不是完成承诺。
 
-## 卸载
+## PF / Realm
 
-```bash
-# 保留配置及计量
-sudo bash install-traffic-scheduler.sh --uninstall
-
-# 同时清除本程序配置和计量
-sudo bash install-traffic-scheduler.sh --uninstall --purge
+```sh
+sudo vps-toolkit pf diagnose
+sudo vps-toolkit pf repair                         # 安装/修复二进制，不重启既有服务
+sudo vps-toolkit pf install --archive ./realm-x86_64-unknown-linux-musl.tar.gz
+sudo vps-toolkit pf rule list
+sudo vps-toolkit pf rule add --listen 0.0.0.0:12345 --remote 目标域名:443 --protocol both
+sudo vps-toolkit pf rule edit 0 --remote 新目标域名:443 --protocol tcp --apply
+sudo vps-toolkit pf rule delete 0 --apply
+sudo vps-toolkit pf service start
+sudo vps-toolkit pf service enable
+sudo vps-toolkit pf service logs
+sudo vps-toolkit pf export ./realm-backup.json
+sudo vps-toolkit pf import ./realm-backup.json --apply
 ```
 
-升级停用旧 `cn-traffic.timer/service`，防止双任务叠加；旧 `/etc/cn-traffic.json`、`/var/lib/cn-traffic/` 和账户不自动删除。
+固定 Realm v2.9.6，默认使用 x86_64/ARM64 官方 musl 包，检查 SHA256、压缩包、ELF 架构、动态加载器和 GLIBC 要求，再原子替换。不会为了 GLIBC 错误升级系统 libc。所有软件资源通过统一下载器验证，支持在 `/etc/vps-toolkit/config.json` 的 `trusted_sources` 设置可信 HTTPS 目录作为备用来源（仍需命中相同官方 SHA256）。
 
-## 开发验证
+规则默认保存不重启，`--apply` 或安装时 `--restart` 才显式应用；启动失败回滚本次配置/二进制。现有 `/etc/realm/config.json`、扩展字段、服务文件、独立 `pf` 入口均保留；没有旧 `pf` 时创建新快捷入口。`vps-toolkit pf legacy` 可进入旧 PF 菜单。TOML 可只读检查/原样导出，不自动重写；转换为 JSON 后再用规则编辑功能。
 
-```bash
-python3 -m unittest -v
-bash -n install.sh
+本工具提供 TCP/UDP、规则增删改查、服务、导入导出及兼容修复，不重新实现上游旧 PF 的通知/隧道等全部交互功能；复杂旧配置保持原样，可继续用旧入口。
+
+## 客户机 Agent 审计与官方卸载
+
+```sh
+sudo vps-toolkit agent audit
+sudo vps-toolkit agent report --output ./agent-report.json
+sudo vps-toolkit agent remove barad --dry-run
+sudo vps-toolkit agent verify
 ```
 
-CI 在 Python 3.8、3.12 运行核心测试，另用 Ubuntu、Debian、Rocky、AlmaLinux、Oracle Linux、CentOS Stream、Fedora、Amazon Linux、openSUSE、Arch 的发行版容器检查依赖安装、解释器选择、账户与配置读取权限、systemd 单元语法，并运行真实本地 HTTP 测试。发行版容器不运行完整 init，不等于逐一整机启动验收；正式安装仍要求 systemd 正在运行，并在使用者服务器真实下载 10 MB 后才启用 timer。
+分别识别 Aliyun 云助手/安全中心/云监控，Tencent TAT/Barad/Sgagent/主机安全及 cloud-init；对比进程、服务、包、目录、自启动位置，报告权限不足/未确认状态。DMI/系统信息不能确认厂商时，只审计；核实云控制台后可 `cloud select aliyun` 或 `cloud select tencent`，不会猜测实例类型。
 
-测试覆盖配置迁移、交互和命令行保存、实际请求额度与限速参数、随机分块总额、单块停止、按速率拆分、小时权重抽样及保存、未完成小块重分配、午夜门槛和旧计划迁移、日期切换、区域校验、源顺序随机、不修改内置表、失败换源、有间隔的有限重试、Retry-After、403/418 冷却、重启延续冷却、并发锁、崩溃预留和匿名文件清理。开发端仅做小流量联网实测，未用公共源持续下载 20 GB。
+卸载仅执行你核实的官方程序，**每个组件单独确认**，本地程序必须 root 所有、不可被组/其他用户写入，并提供从可信官方发布物核实的 SHA256。例如：
 
-Python 安装依据：[RHEL](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/configuring_basic_system_settings/assembly_introduction-to-python_configuring-basic-system-settings)、[Amazon Linux 2023](https://docs.aws.amazon.com/linux/al2023/ug/python.html)。
+```sh
+sudo vps-toolkit agent remove barad --official-script /可信路径/官方卸载程序.sh --sha256 官方可信摘要 --confirm barad
+```
 
-源目录参考：[南京大学](https://mirrors.nju.edu.cn/ubuntu-releases/24.04/)、[中科大说明](https://mirrors.ustc.edu.cn/help/ubuntu-releases.html)、[阿里云公网 ISO 暂停公告](https://mirrors.aliyun.com/ubuntu-releases/24.04/)。
+安全组件还需先在云控制台按官方要求完成自保护关闭/卸载授权，再传 `--console-authorized`。遇到验证码使用官方交互流程。没有可信程序或授权时停止，不杀进程、不改属性、不绕过防护、不强删目录、不抹日志。执行后重新审计，脚本退出成功也不等于组件已消失。
+
+cloud-init 先 `agent remove cloud-init --dry-run` 查看依赖模拟与持久网络文件；必须独立确认网络/SSH 持久化，并同时传 `--confirm-network-independent --confirm cloud-init` 才允许包管理器官方卸载。备份网络文件，保留 `50-cloud-init.yaml`，不重启网络。APK 等未实现安全卸载模拟的系统仅审计 cloud-init。
+
+官方依据与边界见 [审计记录](docs/AUDIT.md)。客户机 Agent、云平台网络、虚拟化宿主机、物理基础设施、控制平面是不同层；本工具只管理客户机组件，控制台展示与客户机状态可能不同。
+
+## 备份、更新和恢复
+
+```sh
+sudo vps-toolkit backup create
+sudo vps-toolkit backup restore ./backup.tar.gz                 # 只预览
+sudo vps-toolkit backup restore ./backup.tar.gz --apply --confirm restore
+sudo vps-toolkit update --check
+sudo vps-toolkit update
+# 国内断网更新：上传新单文件安装器后执行，或用可信摘要校验：
+sudo vps-toolkit update --installer ./install.sh --sha256 通过可信来源核实的摘要
+sudo vps-toolkit uninstall --confirm uninstall
+```
+
+备份限定工具配置、Realm 与下载计量，拒绝路径穿越/符号链接/摘要不匹配；恢复不自动重启任何服务，恢复旧备份也不能降低已经消耗的流量。安装失败恢复本次自身文件与上一版本指针。`uninstall` 移除统一入口和本工具的新定时服务，**保留原 PF、原定时任务、独立模块运行代码、配置、日志与备份**，避免影响仍在使用的模块。
+
+每日 JSON 和任务状态为小文件，会随历史增长；本版本没有自动删历史统计，以免影响月预算和审计。下载文件不会积累。请按 [恢复说明](docs/RECOVERY.md) 管理备份与历史。
+
+## 平台与验证
+
+需要 Linux、Python 3.8+（ssl/fcntl）、64 位 x86_64 或 ARM64；systemd/OpenRC。安装器支持 apt、dnf/yum、apk，也提供 zypper/pacman 分支。容器未运行 init 时可安装和离线检查，不能启用服务。
+
+[兼容与验收矩阵](docs/COMPATIBILITY.md) 区分发行版容器回归、真实 Realm TCP/UDP 验证与尚未完成的云主机验收。[GitHub Actions](https://github.com/KJ20051223/vps-toolkit/actions) 保存每次提交的实际结果。不得将容器通过解释为 Agent 真机卸载、重启网络或云控制台验收通过。
+
+MIT；沿用原 traffic-scheduler 计量、限速、来源健康与调度引擎；对 realm-xwPF 的审查、许可和独立兼容实现见审计文档。

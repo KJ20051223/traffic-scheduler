@@ -1,0 +1,362 @@
+import contextlib
+import datetime as dt
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import struct
+import subprocess
+import tarfile
+import tempfile
+import threading
+import unittest
+from unittest.mock import patch
+from vps_toolkit import agent, backup, forwarder, traffic
+from vps_toolkit.cli import main
+from vps_toolkit.core import Context, Error, atomic, defaults, read_json, save_config, write_json
+from vps_toolkit.health import identify_cloud
+from vps_toolkit.network import fetch
+from vps_toolkit.platform import detect, service
+
+
+class Runner:
+    def __init__(self):
+        self.calls = []
+        self.fail_restart = False
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        code, output = 0, ''
+        if argv[:2] == ['systemctl', 'list-unit-files']:
+            output = 'realm.service enabled\ntraffic-scheduler.timer enabled\n'
+        elif argv[:2] == ['systemctl', 'list-units']:
+            output = 'realm.service loaded active running Realm\n'
+        elif argv[:2] == ['systemctl', 'restart'] and self.fail_restart:
+            self.fail_restart = False
+            code = 1
+        if kwargs.get('check') and code:
+            raise Error('simulated failure')
+        return subprocess.CompletedProcess(argv, code, output, '')
+
+
+class Handler(BaseHTTPRequestHandler):
+    payload = bytes(range(256)) * 20000
+    ranges = []
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        start, end = [int(v) for v in self.headers['Range'][6:].split('-')]
+        self.ranges.append((start, end))
+        if self.path == '/fail':
+            self.send_error(403)
+            return
+        body = self.payload[start:end + 1]
+        self.send_response(206)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Content-Range', 'bytes {}-{}/{}'.format(start, end, len(self.payload)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class LocalNetwork:
+    def __init__(self, server):
+        self.server, self.cache = server, {}
+    def connect(self, url, region):
+        from urllib.parse import urlsplit
+        from http.client import HTTPConnection
+        return HTTPConnection(*self.server.server_address, timeout=2), urlsplit(url), '1.1.1.1', 'CN'
+
+
+class NoPacer:
+    def __init__(self, *args):
+        pass
+    def wait(self, amount):
+        pass
+
+
+class ToolkitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.runner = Runner()
+        self.ctx = Context(self.temp.name, self.runner)
+        self.ctx.require_root = lambda: None
+        self.ctx.path('/run/systemd/system').mkdir(parents=True)
+        self.ctx.path('/proc').mkdir()
+        atomic(self.ctx.path('/etc/os-release'), 'ID=ubuntu\nVERSION_ID="22.04"\n')
+        self.cfg = defaults()
+        self.cfg['traffic'].update(timezone='system', authorized_urls=['http://example.com/file'], task_bytes=10_000_000)
+        save_config(self.ctx, self.cfg)
+        self.at = dt.datetime(2026, 11, 3, 12, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+        if os.name != 'posix':
+            self.lock_patch = patch.object(traffic.engine, 'locked', side_effect=lambda directory: contextlib.nullcontext())
+            self.lock_patch.start()
+            self.addCleanup(self.lock_patch.stop)
+        Handler.ranges = []
+    def download(self, **kwargs):
+        with patch.object(traffic.engine, 'Pacer', NoPacer):
+            return traffic.download(self.ctx, network=LocalNetwork(self.server), at=self.at, **kwargs)
+    def test_new_schedule_disabled_and_manual_exact_bytes_with_hash(self):
+        self.assertFalse(self.cfg['traffic']['enabled'])
+        expected = hashlib.sha256(Handler.payload[:3_000_017]).hexdigest()
+        job = self.download(size=3_000_017, expected_sha256=expected)
+        self.assertEqual(job['status'], 'completed')
+        self.assertEqual(job['received_bytes'], 3_000_017)
+        self.assertEqual(Handler.ranges, [(0, 2_097_151), (2_097_152, 3_000_016)])
+        state = traffic.status(self.ctx, self.at)
+        self.assertEqual(state['today_bytes'], 3_000_017)
+        self.assertFalse(list(self.ctx.path('/var/lib/traffic-scheduler').glob('payload-*')))
+    def test_daily_and_monthly_budgets_include_legacy_downloads(self):
+        self.cfg['traffic'].update(daily_bytes=50, monthly_bytes=60)
+        save_config(self.ctx, self.cfg)
+        directory = self.ctx.path('/var/lib/traffic-scheduler')
+        old = traffic.engine.new_day('2026-11-02')
+        old['download']['bytes'] = 35
+        write_json(directory / 'quota-2026-11-02.json', old)
+        job = self.download(size=40)
+        self.assertEqual(job['received_bytes'], 25)
+        self.assertEqual(job['status'], 'budget_exhausted')
+        with self.assertRaises(Error):
+            self.download(size=1)
+    def test_task_budget_and_url_authorization_reject_before_network(self):
+        with self.assertRaises(Error):
+            self.download(size=10_000_001)
+        with self.assertRaises(Error):
+            self.download(url='https://other.invalid/file', size=1)
+        self.assertEqual(Handler.ranges, [])
+    def test_checksum_failure_keeps_actual_usage_and_cleans_content(self):
+        with self.assertRaises(Error):
+            self.download(size=17, expected_sha256='0' * 64)
+        path = self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-03.json')
+        self.assertEqual(read_json(path)['download']['bytes'], 17)
+        self.assertFalse(list(path.parent.glob('payload-*')))
+    def test_download_failure_is_recorded_without_losing_previous_usage(self):
+        self.cfg['traffic']['authorized_urls'].append('http://example.com/fail')
+        save_config(self.ctx, self.cfg)
+        with self.assertRaises(OSError):
+            self.download(url='http://example.com/fail', size=10)
+        jobs = list((traffic.task_directory(self.ctx) / 'jobs').glob('*.json'))
+        self.assertEqual(read_json(jobs[0])['status'], 'failed')
+    def test_concurrent_job_lock_is_enforced(self):
+        if os.name != 'posix':
+            self.skipTest('fcntl requires POSIX')
+        directory = self.ctx.path('/var/lib/traffic-scheduler')
+        with traffic.engine.locked(directory):
+            with self.assertRaises(traffic.engine.Stop):
+                self.download(size=10)
+    def test_bandwidth_reservation_and_invalid_configuration(self):
+        item = self.cfg['traffic']
+        item.update(link_mbps=10, reserve_mbps=7, mbps=5)
+        traffic.validate(item)
+        self.assertEqual(traffic.effective_rate(item), 3)
+        for invalid in [float('nan'), 0, -1]:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(Error):
+                    traffic.validate(dict(item, mbps=invalid))
+    def test_pause_blocks_download_and_resume_preserves_usage(self):
+        traffic.set_control(self.ctx, 'pause')
+        with self.assertRaises(Error):
+            self.download(size=17)
+        traffic.set_control(self.ctx, 'resume')
+        self.assertEqual(self.download(size=17)['received_bytes'], 17)
+    def test_fresh_disabled_tick_never_opens_network(self):
+        with patch.object(traffic.engine, 'Network', side_effect=AssertionError('must not connect')):
+            self.assertTrue(traffic.tick(self.ctx, self.at)['skipped'])
+    def test_platform_and_openrc_use_correct_commands(self):
+        atomic(self.ctx.path('/etc/os-release'), 'ID=alpine\nVERSION_ID=3.23\n')
+        self.ctx.path('/run/systemd/system').rmdir()
+        self.ctx.path('/run/openrc').mkdir()
+        self.assertEqual(detect(self.ctx)['package_manager'], 'apk')
+        service(self.ctx, 'realm', 'start')
+        self.assertEqual(self.runner.calls[-1], ['rc-service', 'realm', 'start'])
+        self.assertFalse(any('systemctl' in x for x in self.runner.calls))
+    def test_cloud_unknown_and_manual_override(self):
+        self.assertEqual(identify_cloud(self.ctx)['provider'], 'unknown')
+        self.assertEqual(identify_cloud(self.ctx, 'tencent')['confidence'], '用户指定')
+    def test_agent_distinguishes_monitor_components_and_protection(self):
+        self.cfg['cloud_override'] = 'tencent'
+        save_config(self.ctx, self.cfg)
+        self.ctx.path('/usr/local/qcloud/monitor/barad').mkdir(parents=True)
+        folder = self.ctx.path('/proc/123')
+        folder.mkdir()
+        atomic(folder / 'comm', 'YDService\n')
+        found = {c['id']: c for c in agent.audit(self.ctx)['components']}
+        self.assertIn('已安装', found['barad']['state'])
+        self.assertEqual(found['sgagent']['state'], '未发现已知组件')
+        self.assertEqual(found['yunjing']['state'], '运行中')
+        with self.assertRaises(Error):
+            agent.remove(self.ctx, 'yunjing', confirmation='yunjing')
+    def test_agent_dry_run_and_missing_program_do_not_stop_services(self):
+        self.cfg['cloud_override'] = 'aliyun'
+        save_config(self.ctx, self.cfg)
+        self.ctx.path('/usr/local/aegis').mkdir(parents=True)
+        self.assertTrue(agent.remove(self.ctx, 'aegis', dry_run=True)['console_precondition'])
+        with self.assertRaises(Error):
+            agent.remove(self.ctx, 'aegis', confirmation='aegis', console_authorized=True)
+        self.assertFalse(any('stop' in x or 'kill' in x for x in self.runner.calls))
+    def test_agent_missing_after_dd_is_not_claim_of_no_monitoring(self):
+        result = agent.audit(self.ctx)
+        self.assertIn('无法单凭', result['console_notice'])
+        self.assertEqual(len(result['layers']), 5)
+    def test_cloud_init_dry_run_preserves_netplan_and_requires_second_ack(self):
+        network = self.ctx.path('/etc/netplan/50-cloud-init.yaml')
+        atomic(network, 'network:\n  version: 2\n')
+        self.ctx.path('/etc/cloud').mkdir()
+        planned = agent.remove(self.ctx, 'cloud-init', dry_run=True)
+        self.assertTrue(planned['requires_second_confirmation'])
+        with self.assertRaises(Error):
+            agent.remove(self.ctx, 'cloud-init', confirmation='cloud-init')
+        self.assertTrue(network.exists())
+        self.assertFalse(any(x[:3] == ['apt-get', 'remove', '-y'] for x in self.runner.calls))
+    def test_pf_rule_crud_keeps_unknown_configuration_fields(self):
+        path = self.ctx.path('/etc/realm/config.json')
+        write_json(path, {'log': {'level': 'warn'}, 'custom': 'keep', 'endpoints': []})
+        forwarder.rule(self.ctx, 'add', listen='[::]:5555', remote='example.com:443', protocol='udp')
+        saved = read_json(path)
+        self.assertEqual(saved['custom'], 'keep')
+        self.assertTrue(saved['endpoints'][0]['network']['no_tcp'])
+        forwarder.rule(self.ctx, 'edit', index=0, remote='1.1.1.1:53', protocol='both')
+        forwarder.rule(self.ctx, 'delete', index=0)
+        self.assertEqual(read_json(path)['endpoints'], [])
+        self.assertFalse(any('restart' in x for x in self.runner.calls))
+    def test_pf_failed_restart_rolls_back_configuration(self):
+        path = self.ctx.path('/etc/realm/config.json')
+        write_json(path, {'endpoints': [], 'custom': 'keep'})
+        original = path.read_bytes()
+        self.runner.fail_restart = True
+        with self.assertRaises(Error):
+            forwarder.rule(self.ctx, 'add', listen='127.0.0.1:5555', remote='1.1.1.1:443', apply=True)
+        self.assertEqual(path.read_bytes(), original)
+    def test_address_rejects_command_injection_and_bad_ports(self):
+        for value in ['1.1.1.1:99999', '$(id):80', '127.0.0.1:80\nExecStart=/bin/sh']:
+            with self.assertRaises(Error):
+                forwarder.address(value)
+    def test_backup_restore_does_not_reduce_quota(self):
+        quota = self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-03.json')
+        state = traffic.engine.new_day('2026-11-03')
+        state['download']['bytes'] = 17
+        write_json(quota, state)
+        archive = backup.create(self.ctx)['archive']
+        state['download']['bytes'] = 51
+        write_json(quota, state)
+        backup.restore(self.ctx, archive, dry_run=False, confirmation='restore')
+        self.assertEqual(read_json(quota)['download']['bytes'], 51)
+    def test_backup_rejects_path_traversal(self):
+        path = Path(self.temp.name) / 'malicious.tar'
+        with tarfile.open(path, 'w') as bundle:
+            content = b'{}'
+            for name in ['manifest.json', '../../etc/shadow']:
+                entry = tarfile.TarInfo(name)
+                entry.size = len(content)
+                bundle.addfile(entry, io.BytesIO(content))
+        with self.assertRaises(Error):
+            backup.restore(self.ctx, path)
+    def test_offline_download_checks_hash_and_rejects_html(self):
+        source = Path(self.temp.name) / 'source'
+        target = Path(self.temp.name) / 'target'
+        source.write_bytes(b'<!doctype html><html>error</html>')
+        expected = hashlib.sha256(source.read_bytes()).hexdigest()
+        with self.assertRaises(Error):
+            fetch(None, target, expected, local=source)
+        source.write_bytes(b'#!/bin/sh\nexit 0\n')
+        fetch(None, target, hashlib.sha256(source.read_bytes()).hexdigest(), local=source, kind='shell')
+        self.assertEqual(target.read_bytes(), source.read_bytes())
+        with self.assertRaises(Error):
+            fetch(None, target, '0' * 64, local=source)
+    def test_elf_architecture_check(self):
+        path = Path(self.temp.name) / 'realm'
+        data = bytearray(64)
+        data[:6] = b'\x7fELF\x02\x01'
+        struct.pack_into('<H', data, 18, 62)
+        path.write_bytes(data)
+        self.assertEqual(forwarder.inspect_elf(path, 'x86_64')['machine'], 62)
+        with self.assertRaises(Error):
+            forwarder.inspect_elf(path, 'aarch64')
+    def test_noninteractive_configuration_and_status_entry(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['traffic', 'configure', '--daily-gb', '10', '--monthly-gb', '100', '--mbps', '5'], self.ctx), 0)
+        updated = read_json(self.ctx.config_path)
+        self.assertEqual(updated['traffic']['daily_bytes'], 10_000_000_000)
+        self.assertFalse(updated['traffic']['enabled'])
+    def test_scheduler_does_not_enable_without_url_and_keeps_old_timer(self):
+        self.cfg['traffic']['authorized_urls'] = []
+        save_config(self.ctx, self.cfg)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(['traffic', 'enable'], self.ctx), 1)
+        self.assertFalse(any('stop' in x or 'disable' in x for x in self.runner.calls))
+
+    def test_corrupt_monthly_record_fails_closed(self):
+        atomic(self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-01.json'), '{broken')
+        with self.assertRaises(ValueError):
+            self.download(size=17)
+        self.assertEqual(Handler.ranges, [])
+
+    def test_unsettled_reservation_is_conservatively_charged(self):
+        self.cfg['traffic'].update(daily_bytes=50, monthly_bytes=100)
+        save_config(self.ctx, self.cfg)
+        state = traffic.engine.new_day('2026-11-03')
+        state['download']['reserved'] = 17
+        write_json(self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-03.json'), state)
+        job = self.download(size=40)
+        self.assertEqual(job['received_bytes'], 33)
+        self.assertEqual(read_json(self.ctx.path('/var/lib/traffic-scheduler/quota-2026-11-03.json'))['download']['bytes'], 50)
+
+    def test_agent_cancel_and_failure_report_actual_state(self):
+        self.cfg['cloud_override'] = 'tencent'
+        save_config(self.ctx, self.cfg)
+        script = self.ctx.path('/usr/local/qcloud/monitor/barad/admin/uninstall.sh')
+        atomic(script, '#!/bin/sh\nexit 1\n')
+        checksum = hashlib.sha256(script.read_bytes()).hexdigest()
+        with patch.object(agent, 'trusted_local_script'):
+            with self.assertRaises(Error):
+                agent.remove(self.ctx, 'barad', confirmation='cancel', sha256=checksum)
+            self.assertFalse(any(argv[0] == 'bash' for argv in self.runner.calls))
+            def fail_script(argv, **kwargs):
+                if argv[0] == 'bash':
+                    return subprocess.CompletedProcess(argv, 1, '', 'official failure')
+                return self.runner(argv, **kwargs)
+            self.ctx.run = fail_script
+            result = agent.remove(self.ctx, 'barad', confirmation='barad', sha256=checksum)
+            self.assertEqual(result['returncode'], 1)
+            self.assertIn('已安装', result['verified']['state'])
+
+    @unittest.skipUnless(os.name == 'posix', 'installer uses POSIX accounts')
+    def test_installer_preserves_existing_commands_configs_and_service_states(self):
+        import types
+        base = Path(__file__).resolve().parents[1]
+        if not (base / 'MANIFEST.json').exists():
+            base = base.parent.parent / 'outputs/vps-toolkit'
+        spec = importlib.util.spec_from_file_location('toolkit_installer', base / 'install.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        original = '#!/bin/sh\necho original-pf\n'
+        atomic(self.ctx.path('/usr/local/bin/pf'), original, 0o755)
+        atomic(self.ctx.path('/etc/systemd/system/realm.service'), 'Original Realm service\n')
+        account = types.SimpleNamespace(pw_uid=65534, pw_gid=65534)
+        with patch.object(installer.pwd, 'getpwnam', return_value=account), \
+                patch.object(installer.grp, 'getgrnam', return_value=types.SimpleNamespace(gr_gid=65534)), \
+                patch.object(os, 'chown'):
+            installer.install(self.ctx, no_wizard=True)
+        self.assertEqual(self.ctx.path('/usr/local/bin/pf').read_text(), original)
+        self.assertEqual(self.ctx.path('/etc/systemd/system/realm.service').read_text(), 'Original Realm service\n')
+        self.assertFalse(any(operation in argv for argv in self.runner.calls for operation in ('stop', 'start', 'restart', 'enable', 'disable')))
+        self.assertFalse(read_json(self.ctx.config_path)['traffic']['enabled'])
+
+    def test_redaction_does_not_export_credentials(self):
+        from vps_toolkit.core import redact
+        self.assertNotIn('secretvalue', redact('{"password": "secretvalue"}'))
+        self.assertNotIn('abc123', redact('Authorization: Bearer abc123'))

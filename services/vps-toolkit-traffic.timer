@@ -1,0 +1,9 @@
+# Managed by vps-toolkit
+[Unit]
+Description=Check authorized scheduled downloads every minute
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Persistent=false
+[Install]
+WantedBy=timers.target

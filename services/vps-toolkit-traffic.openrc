@@ -1,0 +1,11 @@
+#!/sbin/openrc-run
+# Managed by vps-toolkit
+name="VPS Toolkit Traffic"
+command="/usr/bin/python3"
+command_args="/opt/vps-toolkit/current/traffic_daemon.py"
+command_user="traffic-scheduler:traffic-scheduler"
+command_background=true
+pidfile="/run/vps-toolkit-traffic.pid"
+output_log="/var/log/vps-toolkit/vps-toolkit-traffic.log"
+error_log="/var/log/vps-toolkit/vps-toolkit-traffic.log"
+depend() { need net; }

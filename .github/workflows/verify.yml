@@ -1,0 +1,50 @@
+name: VPS Toolkit verification
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest -v tests.test_toolkit compat.test_traffic_scheduler
+      - run: sh -n install.sh && sh -n services/vps-toolkit-traffic.openrc
+  platforms:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:11
+          - debian:12
+          - debian:13
+          - alpine:3.20
+          - alpine:3.23
+          - rockylinux:8
+          - rockylinux:9
+          - almalinux:10
+          - quay.io/centos/centos:stream9
+          - quay.io/centos/centos:stream10
+          - fedora:44
+          - tencentos/tencentos4-minimal:latest
+          - alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:230602.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Actual bootstrap and regression tests
+        run: docker run --rm -v "$PWD:/source:ro" '${{ matrix.image }}' sh /source/ci/platform.sh
+  realm:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ci/realm_smoke.py

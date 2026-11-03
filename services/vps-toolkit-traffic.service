@@ -1,0 +1,18 @@
+# Managed by vps-toolkit
+[Unit]
+Description=Authorized HTTP download tasks with shared traffic budgets
+After=network-online.target
+[Service]
+Type=oneshot
+User=traffic-scheduler
+Group=traffic-scheduler
+ExecStart=/usr/bin/python3 /opt/vps-toolkit/current/run.py traffic tick
+RuntimeMaxSec=55s
+TimeoutStopSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/traffic-scheduler /var/lib/vps-toolkit/traffic
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
