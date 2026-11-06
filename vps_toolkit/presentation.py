@@ -19,6 +19,7 @@ STATES.update({'ready': '可执行', 'blocked': '未满足执行条件', 'exclud
                'removed': '已卸载', 'residual': '仍有残留/需复核', 'disabled_only': '仅禁用下次启动，未完全卸载',
                'idle': '等待下次任务', 'connecting': '正在连接', 'receiving': '正在下载',
                'between_requests': '分块已结算，准备下一块', 'not_run': '未执行'})
+STATES['cooldown'] = '任务间隔：随机等待'
 LABELS = {'saved': '已保存至', 'exported': '已导出至', 'archive': '备份文件', 'files': '文件数量/列表',
           'output': '执行输出', 'returncode': '退出状态', 'note': '说明', 'reason': '原因', 'action': '操作',
           'version': '版本', 'installed': '当前版本', 'available': '可用版本', 'sha256': 'SHA256',
@@ -169,6 +170,8 @@ def traffic_settings(item):
             row(LABELS[key], size(item[key]) if key.endswith('_bytes') else item[key])
     row('下载方式', '仅下行测速' if item.get('download_mode') == 'speedtest' else '文件分段下载')
     row('最大连接数', item['max_concurrency'])
+    row('每批目标时间', '{} 秒'.format(item.get('batch_seconds', 8)))
+    row('批次随机间隔', '{}–{} 秒'.format(item.get('cooldown_min_seconds', 5), item.get('cooldown_max_seconds', 10)))
     if item.get('strategy') == 'ratio':
         for key in ('ratio', 'ratio_schedule', 'ratio_interface', 'ratio_tolerance_pct'):
             row(LABELS[key], item.get(key))
@@ -224,6 +227,8 @@ def render_progress(value):
         row('本次任务还剩', size(max(0, value['requested_bytes'] - value['received_bytes'])))
     row('当前有效负载速度', '{:.2f} Mbps'.format(value['speed_mbps']))
     row('设置限速', '{} Mbps'.format(value['configured_mbps']))
+    if value.get('cooldown_remaining_seconds', 0) > 0:
+        row('下批开始前还需等待', '{:.1f} 秒'.format(value['cooldown_remaining_seconds']))
     if 'connections' in value:
         row('连接数 / 配置上限', '{} / {}'.format(value['connections'], value['max_concurrency']))
         row('下载方式', '仅下行测速' if value['download_mode'] == 'speedtest' else '文件分段下载')

@@ -10,14 +10,16 @@ import unittest
 from unittest.mock import patch
 from vps_toolkit import downloader, traffic
 from vps_toolkit.cli import main
-from vps_toolkit.core import Context, Error, defaults, read_json, save_config
+from vps_toolkit.core import Context, Error, defaults, read_json, save_config, write_json
 from tests.test_toolkit import LocalNetwork
 
 
 class Handler(BaseHTTPRequestHandler):
-    payload = b'x' * 4_000_000
+    total_size = 100_000_000
+    delay = 0.003
     active = maximum = 0
     ranges = []
+    starts = []
     lock = threading.Lock()
     fail_once = False
     def log_message(self, *args):
@@ -28,24 +30,29 @@ class Handler(BaseHTTPRequestHandler):
             type(self).active += 1
             type(self).maximum = max(self.maximum, self.active)
             self.ranges.append((start, end))
+            self.starts.append((start, time.monotonic()))
             truncated = self.path == '/retry' and self.fail_once
             if truncated:
                 type(self).fail_once = False
         try:
+            if self.path == '/blocked':
+                self.send_error(403)
+                return
             streaming = self.path == '/stream'
-            body = self.payload if streaming else self.payload[start:end + 1]
+            length = 4_000_000 if streaming else min(end + 1, self.total_size) - start
             self.send_response(200 if streaming else 206)
-            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Content-Length', str(length))
             if not streaming:
-                self.send_header('Content-Range', 'bytes {}-{}/{}'.format(start, end, len(self.payload)))
+                self.send_header('Content-Range', 'bytes {}-{}/{}'.format(start, start + length - 1, self.total_size))
             self.end_headers()
             if truncated:
-                self.wfile.write(body[:4096])
+                self.wfile.write(b'x' * min(4096, length))
                 return
-            for position in range(0, len(body), 4096):
-                self.wfile.write(body[position:position + 4096])
+            for position in range(0, length, 4096):
+                self.wfile.write(b'x' * min(4096, length - position))
                 self.wfile.flush()
-                time.sleep(0.003)
+                if self.delay:
+                    time.sleep(self.delay)
         except (ConnectionError, OSError):
             pass
         finally:
@@ -71,7 +78,8 @@ class DownloaderTests(unittest.TestCase):
         self.ctx.require_root = lambda: None
         self.cfg = defaults()
         self.cfg['traffic'].update(authorized_urls=['http://example.com/file', 'http://example.com/stream',
-                                                  'http://example.com/retry'], mbps=8, max_runtime=20)
+                                                  'http://example.com/retry'], mbps=8, max_runtime=20,
+                                   cooldown_min_seconds=0, cooldown_max_seconds=0)
         save_config(self.ctx, self.cfg)
         self.at = dt.datetime(2026, 11, 6, 12, tzinfo=dt.timezone.utc)
         if os.name != 'posix':
@@ -81,7 +89,9 @@ class DownloaderTests(unittest.TestCase):
         with Handler.lock:
             Handler.maximum = Handler.active = 0
             Handler.ranges = []
+            Handler.starts = []
             Handler.fail_once = False
+            Handler.delay = 0.003
     def download(self, **kwargs):
         return traffic.download(self.ctx, network=LocalNetwork(self.server), at=self.at, **kwargs)
     def ledger(self):
@@ -215,6 +225,124 @@ class DownloaderTests(unittest.TestCase):
             self.assertEqual(traffic.engine.transient(error), retry)
             self.assertEqual(error.status, status)
 
+    def test_legacy_failover_still_works_after_failed_workers_are_cancelled(self):
+        self.cfg['traffic']['authorized_urls'].append('http://example.com/blocked')
+        save_config(self.ctx, self.cfg)
+        pool = [{'name': 'blocked', 'url': 'http://example.com/blocked', 'kind': 'range'},
+                {'name': 'working', 'url': 'http://example.com/file', 'kind': 'range'}]
+        config = traffic.engine.default_config()
+        config['directions']['download'].update(daily_bytes=180_000, targets=pool)
+        directory, path, data, _ = traffic.ledger(self.ctx, self.cfg['traffic'], self.at)
+        def settings(context):
+            current = read_json(self.ctx.config_path)
+            current['traffic']['state_dir'] = str(directory)
+            return current
+        health = {}
+        with patch.object(traffic.engine, 'toolkit_home', return_value=self.ctx.root), \
+                patch('vps_toolkit.core.Context', return_value=self.ctx), \
+                patch.object(traffic, 'configuration', side_effect=settings), \
+                patch.object(traffic.engine, 'shuffled_targets', return_value=pool):
+            traffic.engine.run_session(config, data, path, directory, LocalNetwork(self.server),
+                                       max_bytes=180_000, health=health)
+        self.assertEqual(data['download']['bytes'], 180_000)
+        self.assertEqual(health[pool[0]['url']]['status'], 403)
+
+    def test_50mbps_download_uses_one_50mb_batch_with_four_large_ranges(self):
+        self.cfg['traffic']['mbps'] = 50
+        save_config(self.ctx, self.cfg)
+        Handler.delay = 0
+        with patch.object(downloader.RateGate, 'acquire', side_effect=lambda n: min(n, 32768)):
+            job = self.download(size=50_000_000)
+        self.assertEqual(job['status'], 'completed')
+        self.assertEqual(job['received_bytes'], 50_000_000)
+        self.assertEqual(sorted(Handler.ranges), [(0, 12_499_999), (12_500_000, 24_999_999),
+                                                  (25_000_000, 37_499_999), (37_500_000, 49_999_999)])
+        self.assertEqual(self.ledger()['bytes'], 50_000_000)
+        self.assertFalse(list(self.ctx.path('/var/lib/traffic-scheduler').glob('payload-*')))
+
+    def test_new_session_honors_persisted_random_wait_without_resetting_it(self):
+        self.cfg['traffic'].update(cooldown_min_seconds=5, cooldown_max_seconds=10)
+        save_config(self.ctx, self.cfg)
+        directory = self.ctx.path('/var/lib/traffic-scheduler')
+        beginning = time.time()
+        stamp = [beginning]
+        updates = []
+        def report(*args):
+            updates.append((stamp[0], report.cooldown_until))
+        def sleep(seconds):
+            stamp[0] += seconds
+        with patch.object(downloader.time, 'time', side_effect=lambda: stamp[0]), \
+                patch.object(downloader.time, 'sleep', side_effect=sleep), \
+                patch.object(downloader.random, 'SystemRandom') as rng:
+            rng.return_value.uniform.return_value = 7.5
+            downloader.Session(self.ctx).schedule_cooldown(directory)
+            rng.return_value.uniform.assert_called_once_with(5, 10)
+            saved = (directory / 'cooldown.json').read_bytes()
+            downloader.Session(self.ctx).wait_ready(directory, report)
+            self.assertAlmostEqual(stamp[0], beginning + 7.5)
+            self.assertTrue(updates)
+            self.assertTrue(all(until == beginning + 7.5 for _, until in updates))
+            self.assertEqual((directory / 'cooldown.json').read_bytes(), saved)
+
+    def test_budget_rechecked_after_wait_before_opening_any_connection(self):
+        self.cfg['traffic'].update(cooldown_min_seconds=0.15, cooldown_max_seconds=0.15)
+        save_config(self.ctx, self.cfg)
+        directory = self.ctx.path('/var/lib/traffic-scheduler')
+        write_json(directory / 'cooldown.json', {'until': time.time() + 1.5})
+        def editor():
+            time.sleep(0.05)
+            config = read_json(self.ctx.config_path)
+            config['traffic']['daily_bytes'] = 17
+            save_config(self.ctx, config)
+        thread = threading.Thread(target=editor)
+        thread.start()
+        try:
+            job = self.download(size=1000)
+        finally:
+            thread.join()
+        self.assertEqual((job['status'], job['received_bytes']), ('budget_exhausted', 17))
+        self.assertEqual(sum(last - first + 1 for first, last in Handler.ranges), 17)
+
+    def test_multiple_large_batches_wait_between_connections_and_keep_exact_total(self):
+        self.cfg['traffic'].update(cooldown_min_seconds=0.1, cooldown_max_seconds=0.1)
+        save_config(self.ctx, self.cfg)
+        Handler.delay = 0
+        with patch.object(downloader.RateGate, 'acquire', side_effect=lambda n: min(n, 32768)):
+            job = self.download(size=10_000_000)
+        self.assertEqual(job['status'], 'completed')
+        self.assertEqual(self.ledger()['bytes'], 10_000_000)
+        first = [stamp for position, stamp in Handler.starts if position < 8_000_000]
+        second = [stamp for position, stamp in Handler.starts if position >= 8_000_000]
+        self.assertEqual((len(first), len(second)), (4, 4))
+        self.assertGreaterEqual(min(second) - max(first), 0.095)
+        self.assertEqual(sum(end - start + 1 for start, end in Handler.ranges), 10_000_000)
+
+    def test_pause_during_random_wait_stops_without_network_or_quota_reservation(self):
+        self.cfg['traffic'].update(cooldown_min_seconds=5, cooldown_max_seconds=10)
+        save_config(self.ctx, self.cfg)
+        directory = self.ctx.path('/var/lib/traffic-scheduler')
+        write_json(directory / 'cooldown.json', {'until': time.time() + 7})
+        def editor():
+            time.sleep(0.15)
+            traffic.set_control(self.ctx, 'pause')
+        thread = threading.Thread(target=editor)
+        thread.start()
+        try:
+            job = self.download(size=1000)
+        finally:
+            thread.join()
+        self.assertEqual(job['status'], 'paused')
+        self.assertEqual(Handler.ranges, [])
+        self.assertEqual(job['received_bytes'], 0)
+
+    def test_batch_configuration_validation_never_overwrites_invalid_values(self):
+        before = self.ctx.config_path.read_bytes()
+        for flags in (['--batch-seconds', '0'], ['--batch-seconds', 'nan'],
+                      ['--cooldown-min-seconds', '11', '--cooldown-max-seconds', '10']):
+            with patch('sys.stderr', io.StringIO()):
+                self.assertEqual(main(['traffic', 'configure'] + flags, self.ctx), 1)
+            self.assertEqual(self.ctx.config_path.read_bytes(), before)
+
     def test_hash_file_uses_ordered_single_reader_and_speedtest_rejects_hash(self):
         import hashlib
         job = self.download(size=200_000, expected_sha256=hashlib.sha256(b'x' * 200_000).hexdigest())
@@ -238,6 +366,13 @@ class DownloaderTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    def test_batch_sizes_follow_aggregate_speed_and_cap_total_reservation(self):
+        self.assertEqual(downloader.batch_bytes(50, 4), 50_000_000)
+        self.assertEqual(downloader.batch_bytes(5, 4), 5_000_000)
+        self.assertEqual(downloader.batch_bytes(0.1, 4), 100_000)
+        self.assertEqual(downloader.batch_bytes(50, 4, 12), 75_000_000)
+        self.assertEqual(downloader.batch_bytes(50, 1), 2 * 1024 * 1024)
+        self.assertEqual(downloader.batch_bytes(10000, 32), 256 * 1024 * 1024)
     def test_four_threads_share_one_ceiling_with_no_startup_or_idle_burst(self):
         stamp = [0.0]
         observed = []

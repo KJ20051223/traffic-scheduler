@@ -100,7 +100,7 @@ class ToolkitTests(unittest.TestCase):
         atomic(self.ctx.path('/etc/os-release'), 'ID=ubuntu\nVERSION_ID="22.04"\n')
         self.cfg = defaults()
         self.cfg['traffic'].update(timezone='system', authorized_urls=['http://example.com/file'], task_bytes=10_000_000,
-                                   max_concurrency=1)
+                                   max_concurrency=1, cooldown_min_seconds=0, cooldown_max_seconds=0)
         save_config(self.ctx, self.cfg)
         self.at = dt.datetime(2026, 11, 3, 12, tzinfo=dt.timezone(dt.timedelta(hours=8)))
         if os.name != 'posix':

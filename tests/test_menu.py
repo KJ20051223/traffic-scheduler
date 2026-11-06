@@ -186,6 +186,15 @@ class MenuTests(unittest.TestCase):
         self.assertEqual((item['strategy'], item['enabled'], item['paused']), ('ratio', True, True))
         self.assertEqual((item['download_mode'], item['max_concurrency'], item['mbps']), ('speedtest', 4, 3))
 
+    def test_batch_menu_sets_random_interval_and_preserves_speed_and_task_state(self):
+        cfg = read_json(self.ctx.config_path)
+        cfg['traffic'].update(enabled=True, paused=True)
+        save_config(self.ctx, cfg)
+        self.assertEqual(self.interact(['10', '17', '8', '5', '10', '0', '0', '0']), 0)
+        item = read_json(self.ctx.config_path)['traffic']
+        self.assertEqual((item['batch_seconds'], item['cooldown_min_seconds'], item['cooldown_max_seconds']), (8, 5, 10))
+        self.assertEqual((item['mbps'], item['enabled'], item['paused']), (cfg['traffic']['mbps'], True, True))
+
     def test_plain_language_reports_keep_agent_limitations_ratio_and_rules(self):
         out = io.StringIO()
         with patch('sys.stdout', out):

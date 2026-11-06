@@ -143,6 +143,7 @@ def defaults():
             'traffic': {'enabled': False, 'timezone': 'system', 'daily_bytes': 20_000_000_000,
                         'monthly_bytes': 600_000_000_000, 'task_bytes': 100_000_000,
                         'mbps': 5.0, 'max_runtime': 300, 'max_concurrency': 4, 'download_mode': 'file',
+                        'batch_seconds': 8.0, 'cooldown_min_seconds': 5.0, 'cooldown_max_seconds': 10.0,
                         'link_mbps': None, 'reserve_mbps': 0, 'authorized_urls': [],
                         'region': 'cn', 'state_dir': '/var/lib/traffic-scheduler',
                         'times': [], 'window': ['00:00', '23:59'], 'paused': False,

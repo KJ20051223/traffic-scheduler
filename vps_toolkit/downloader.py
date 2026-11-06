@@ -5,6 +5,7 @@ unfinished file ranges survive pause/retry without treating a byte count as an
 offset into a partially completed parallel batch.
 """
 import math
+import random
 import re
 import socket
 import tempfile
@@ -12,7 +13,22 @@ import threading
 import time
 from urllib.parse import urljoin
 from compat import traffic_scheduler as engine
-from .core import Error, configuration, read_json
+from .core import Error, configuration, read_json, write_json
+
+
+def batch_bytes(rate, connections, seconds=8):
+    cap = engine.PIECE if connections == 1 else 256 * 1024 * 1024
+    return min(cap, max(1, int(rate * 125000 * seconds)))
+
+
+def cooldown_until(directory):
+    record = read_json(directory / 'cooldown.json', {})
+    if not isinstance(record, dict):
+        raise Error('下载间隔记录无效，拒绝跳过等待')
+    value = record.get('until', 0)
+    if type(value) not in (float, int) or not math.isfinite(value) or value < 0:
+        raise Error('下载间隔记录无效，拒绝跳过等待')
+    return value
 
 
 class TransferError(OSError):
@@ -73,6 +89,36 @@ class Session:
         self.target_url = None
         self.sockets = set()
         self.socket_lock = threading.Lock()
+
+    def batch_bytes(self):
+        settings = self.settings()
+        return batch_bytes(settings['rate'], settings['max_concurrency'], settings['batch_seconds'])
+
+    def wait_ready(self, directory, progress):
+        # Previous failed workers have joined before the coordinator retries or
+        # switches source. Their cancellation must not cancel the next batch.
+        self.cancel.clear()
+        self.checked = -math.inf
+        until = cooldown_until(directory)
+        if self.settings()['cooldown_max_seconds'] == 0:
+            until = 0
+        progress.connections = 0
+        progress.cooldown_until = until
+        if until > time.time():
+            engine.log('任务间隔：随机等待剩余 {:.1f} 秒'.format(until - time.time()))
+        while until > time.time():
+            self.settings()  # Pause/stop and configuration errors remain responsive while idle.
+            progress(0, 0)
+            time.sleep(min(0.2, max(0, until - time.time())))
+        progress.cooldown_until = 0
+
+    def schedule_cooldown(self, directory):
+        from .traffic import validate
+        settings = validate(configuration(self.ctx)['traffic'])
+        delay = random.SystemRandom().uniform(settings['cooldown_min_seconds'], settings['cooldown_max_seconds'])
+        finished = time.time()
+        write_json(directory / 'cooldown.json', {'finished_at': finished, 'delay_seconds': delay,
+                                               'until': finished + delay})
 
     def abort(self):
         self.cancel.set()
@@ -216,15 +262,17 @@ class Session:
         completed = [False] * len(ranges)
         errors = []
         lock = threading.RLock()
-        started = time.monotonic()
         entry = data['download']
-        entry['reserved'] = amount
-        engine.atomic_json(path, data)
         if progress is None:
             from .progress import reporter
             progress = reporter(directory, data, requested=amount)
         progress.connections = self.connections
         progress.mode = self.mode
+        self.wait_ready(directory, progress)
+        progress.connections = self.connections
+        started = time.monotonic()
+        entry['reserved'] = amount
+        engine.atomic_json(path, data)
         progress(0, 0)
 
         def worker(index):
@@ -314,6 +362,7 @@ class Session:
             if isinstance(substantive, engine.ERRORS):
                 raise TransferError(substantive)
             raise substantive
+        self.schedule_cooldown(directory)
         engine.log('下行 {} 字节，{} 连接，模式={}，临时内容已清理'.format(actual, self.connections, self.mode))
         return actual
 

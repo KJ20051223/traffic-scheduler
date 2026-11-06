@@ -33,6 +33,14 @@ class ProgressTests(unittest.TestCase):
         self.assertFalse(result['active'])
         self.assertEqual(before, sorted(str(p) for p in self.ctx.root.rglob('*')))
 
+    def test_persisted_between_task_cooldown_is_visible_without_a_live_process(self):
+        write_json(self.directory / 'cooldown.json', {'until': time.time() + 7})
+        result = progress.snapshot(self.ctx, self.at)
+        self.assertEqual(result['status'], 'cooldown')
+        self.assertGreater(result['cooldown_remaining_seconds'], 5)
+        self.assertEqual(result['speed_mbps'], 0)
+        self.assertFalse(result['active'])
+
     def test_active_progress_sees_inflight_bytes_percent_and_speed_without_settling_quota(self):
         self.data['download'].update(bytes=2_000_000, reserved=2_000_000)
         path = self.directory / 'quota-2026-11-03.json'

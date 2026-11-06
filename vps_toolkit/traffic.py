@@ -43,6 +43,14 @@ def moment(timezone='system', timestamp=None):
 
 def validate(item):
     ratio.validate(item)
+    for name, default in (('batch_seconds', 8.0), ('cooldown_min_seconds', 5.0), ('cooldown_max_seconds', 10.0)):
+        item.setdefault(name, default)
+        if type(item[name]) not in (float, int) or not math.isfinite(item[name]):
+            raise Error(name + ' 必须为有限数字')
+    if not 1 <= item['batch_seconds'] <= 30:
+        raise Error('每批目标下载时间须在 1–30 秒之间')
+    if not 0 <= item['cooldown_min_seconds'] <= item['cooldown_max_seconds'] <= 300:
+        raise Error('随机间隔须满足 0 ≤ 最小秒数 ≤ 最大秒数 ≤ 300')
     for field in ('daily_bytes', 'monthly_bytes', 'task_bytes', 'max_runtime', 'max_concurrency'):
         if type(item.get(field)) is not int or item[field] <= 0:
             raise Error(field + ' 必须是正整数')
@@ -248,7 +256,7 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
         job = dict(id=identifier, url=url, requested_bytes=amount, received_bytes=0, status='running',
                    started=moment(item['timezone']).isoformat(), sha256=expected_sha256, ignore_ratio=ignore_ratio,
                    download_mode=item.get('download_mode', 'file'))
-    from .downloader import Session
+    from .downloader import Session, batch_bytes
     pacer = Session(ctx, mbps=mbps, pending=job.get('pending_ranges'))
     pacer.identifier = identifier
     hasher = hashlib.sha256() if expected_sha256 else None
@@ -267,6 +275,8 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
         try:
             with engine.deadline(runtime):
                 while offset < amount:
+                    pacer.wait_ready(directory, progress.reporter(directory, data, requested=amount,
+                                     job_id=identifier, offset=offset))
                     item = validate(configuration(ctx)['traffic'])
                     rate = pacer.settings()['rate']
                     flags = read_json(task_directory(ctx) / 'control.json', {})
@@ -286,7 +296,8 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
                         if budget <= 0:
                             job['status'] = 'ratio_satisfied'
                             break
-                    piece = min(engine.PIECE, amount - offset, budget, max(1, int(rate * 125000 * 8)))
+                    piece = min(amount - offset, budget, batch_bytes(rate,
+                                1 if hasher else item['max_concurrency'], item['batch_seconds']))
                     before = data['download']['bytes']
                     try:
                         kind = 'generated' if urlsplit(url).hostname == 'speed.cloudflare.com' and urlsplit(url).path == '/__down' else 'file'

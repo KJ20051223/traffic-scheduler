@@ -23,6 +23,9 @@ def reporter(directory, data, requested=None, job_id=None, offset=0):
                       bytes_per_second=actual / elapsed if elapsed > 0 else 0,
                       status='between_requests' if final else 'receiving' if actual else 'connecting',
                       entry='新下载入口' if job_id else '兼容旧入口 · 当前分块')
+        record['cooldown_until'] = getattr(update, 'cooldown_until', 0)
+        if record['cooldown_until'] > stamp:
+            record.update(status='cooldown', bytes_per_second=0)
         record['connections'] = getattr(update, 'connections', 1)
         record['download_mode'] = getattr(update, 'mode', 'file')
         try:
@@ -83,6 +86,7 @@ def ratio_preview(ctx, item):
 
 def snapshot(ctx, at=None):
     from . import traffic
+    from .downloader import cooldown_until
     item = traffic.validate(configuration(ctx)['traffic'])
     current = at or traffic.moment(item['timezone'])
     directory = ctx.path(item['state_dir'])
@@ -95,7 +99,7 @@ def snapshot(ctx, at=None):
     if isinstance(identifier, str) and len(identifier) == 32 and all(c in '0123456789abcdef' for c in identifier):
         job = read_json(traffic.task_directory(ctx) / 'jobs' / (identifier + '.json'))
     age = max(0, time.time() - live.get('sampled_at', 0))
-    active = (live.get('status') in ('receiving', 'connecting', 'between_requests') and alive(live.get('pid'))
+    active = (live.get('status') in ('receiving', 'connecting', 'between_requests', 'cooldown') and alive(live.get('pid'))
               and age < max(item['max_runtime'], 55) + 60)
     amount = live.get('received_bytes', 0) if active else (job or live).get('received_bytes', 0)
     total = (job or live).get('requested_bytes')
@@ -120,6 +124,9 @@ def snapshot(ctx, at=None):
                   paused=item['paused'], enabled=item['enabled'], strategy=item['strategy'],
                   update_age_seconds=round(age, 1) if live else None,
                   note='每秒刷新；实时已接收量尚待当前分块结算，最终配额以已结算字节为准。')
+    result['cooldown_remaining_seconds'] = max(0, cooldown_until(directory) - time.time()) if item['cooldown_max_seconds'] else 0
+    if result['cooldown_remaining_seconds'] > 0 and not item['paused']:
+        result.update(status='cooldown', speed_mbps=0, eta_seconds=None)
     if item['strategy'] == 'ratio':
         try:
             result['machine_traffic'] = ratio_preview(ctx, item)

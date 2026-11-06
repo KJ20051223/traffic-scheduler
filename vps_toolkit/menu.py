@@ -306,6 +306,14 @@ def configure_download(ctx):
               '--mbps', ask('所有连接合计限速 Mbps（运行中修改生效）', item['mbps'])])
 
 
+def configure_batches(ctx):
+    item = configuration(ctx)['traffic']
+    print('按总限速计算多连接分块；每批完成后随机等待，再继续下载。\n')
+    run(ctx, ['traffic', 'configure', '--batch-seconds', ask('每批目标下载秒数（1–30）', item.get('batch_seconds', 8)),
+              '--cooldown-min-seconds', ask('随机等待最少秒数', item.get('cooldown_min_seconds', 5)),
+              '--cooldown-max-seconds', ask('随机等待最多秒数', item.get('cooldown_max_seconds', 10))])
+
+
 def ratio_seed(ctx):
     print('输入此刻整机的累计总量，含已有历史；不是要增加的差值。\n不会清零本工具日/月已用额度。\n')
     run(ctx, ['traffic', 'ratio-seed', '--upload-gb', ask('累计上行 GB'), '--download-gb', ask('累计下行 GB')])
@@ -343,7 +351,8 @@ def traffic_menu(ctx):
                ('13', '移除授权下载资源', lambda: resource(ctx, True)),
                ('14', '实时下载进度（每秒刷新）', lambda: watch_progress(ctx)),
                ('15', '切换下载模式（固定额度 / 累计比例）', lambda: configure_strategy(ctx)),
-               ('16', '多连接 / 仅下行测速 / 实时限速', lambda: configure_download(ctx))]
+               ('16', '多连接 / 仅下行测速 / 实时限速', lambda: configure_download(ctx)),
+               ('17', '每批下载大小 / 任务随机间隔', lambda: configure_batches(ctx))]
     submenu(ctx, '下载任务调度', entries)
 
 

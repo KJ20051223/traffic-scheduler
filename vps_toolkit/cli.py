@@ -102,7 +102,8 @@ def parser(human=False):
     q.add_argument('url')
     q.add_argument('--remove', action='store_true')
     q = t.add_parser('configure')
-    for flag in ('daily-gb', 'monthly-gb', 'task-gb', 'mbps', 'link-mbps', 'reserve-mbps'):
+    for flag in ('daily-gb', 'monthly-gb', 'task-gb', 'mbps', 'link-mbps', 'reserve-mbps',
+                 'batch-seconds', 'cooldown-min-seconds', 'cooldown-max-seconds'):
         q.add_argument('--' + flag, type=float)
     for flag in ('max-runtime', 'max-concurrency'):
         q.add_argument('--' + flag, type=int)
@@ -249,7 +250,8 @@ def traffic_dispatch(ctx, args):
                     raise Error('流量预算须为有限正数')
                 item[name + '_bytes'] = int(value * 1e9)
         for name in ('mbps', 'link_mbps', 'reserve_mbps', 'max_runtime', 'max_concurrency', 'region',
-                     'strategy', 'ratio', 'ratio_interface', 'ratio_schedule', 'ratio_tolerance_pct', 'download_mode'):
+                     'strategy', 'ratio', 'ratio_interface', 'ratio_schedule', 'ratio_tolerance_pct', 'download_mode',
+                     'batch_seconds', 'cooldown_min_seconds', 'cooldown_max_seconds'):
             value = getattr(args, name)
             if value is not None:
                 item[name] = value

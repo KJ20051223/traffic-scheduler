@@ -21,7 +21,7 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '3.4.0'
+VERSION = '3.4.1'
 PLAN_VERSION = 2
 PLAN_WORK_SECONDS = 40
 # Adjustable estimates, not measurements of real users or upload traffic.
@@ -595,6 +595,9 @@ def run_session(config, data, path, directory, network, metric='bytes', health=N
         direction = pick_direction(config, data, metric)
         if direction is None:
             return True
+        if hasattr(pacers[direction], 'wait_ready'):
+            from vps_toolkit.progress import reporter
+            pacers[direction].wait_ready(directory, reporter(directory, data))
         item = config['directions'][direction]
         candidates = [t for t in pools[direction] if t['url'] not in failed[direction]]
         available = [t for t in candidates if health.get(t['url'], {}).get('until', 0) <= time.time()]
@@ -613,7 +616,8 @@ def run_session(config, data, path, directory, network, metric='bytes', health=N
         if selected.get(direction) != target:
             log('本次随机候选选择：{}（共 {} 个目标，失败自动换源）'.format(target['name'], len(pools[direction])))
         # At a low configured speed, finish a request inside a short time slice.
-        amount = min(PIECE, max(1, int(item['mbps'] * 125000 * 8)),
+        capacity = pacers[direction].batch_bytes() if hasattr(pacers[direction], 'batch_bytes') else min(PIECE, max(1, int(item['mbps'] * 125000 * 8)))
+        amount = min(capacity,
                      item['daily_bytes'] - data[direction][metric])
         if stop_at is not None:
             amount = min(amount, stop_at - data[direction][metric])
