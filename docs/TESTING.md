@@ -6,7 +6,7 @@ Linux 单元测试 **171 项全部通过，未跳过**，安装器 Shell 语法�
 
 运行时代码提交：`e26170758ad7e19b048fb4c6b277bf66670fa47a`。单文件安装器 SHA256：`4c26702e98a451de12415687bda7837c9bf8a7d3beb6775c2eb19afa26d0cb5a`。
 
-工作流 [42190388139](https://github.com/KJ20051223/vps-toolkit/actions/runs/42190388139) 已通过 Linux 单元测试/systemd 沙箱、15 个发行版安装/回归/离线重装及 x86_64/ARM64 Realm TCP/UDP；Alibaba Cloud Linux 3 安装任务仍在运行。
+工作流 [42190388139](https://github.com/KJ20051223/vps-toolkit/actions/runs/42190388139) 的 **19 个任务全部通过**：Linux 单元测试/systemd 沙箱、16 个发行版安装/回归/离线重装及 x86_64/ARM64 Realm TCP/UDP，包含 Alibaba Cloud Linux 3 与 TencentOS 4。Linux CI 没有跳过或重试失败检查。
 
 限速测试验证的是所有工作线程的有效负载合计读取许可与实际接收量，包含运行中 2 → 0.5 → 4 Mbps 的改速。50 毫秒令牌缓冲、协议开销、重传、在途及内核缓冲流量会影响网卡短窗口读数；没有声称任意瞬间的整机物理带宽绝不超限，也没有证明可避免阿里云/腾讯云平台限速或保证公共镜像跑满设置速度。
 
