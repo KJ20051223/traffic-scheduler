@@ -47,7 +47,9 @@ def validate(item):
         if type(item.get(field)) is not int or item[field] <= 0:
             raise Error(field + ' 必须是正整数')
     if item['max_concurrency'] > 32:
-        raise Error('最大并发上限为 32；当前共享计量实现始终串行，实际并发不超过 1')
+        raise Error('最大并发上限为 32')
+    if item.get('download_mode', 'file') not in ('file', 'speedtest'):
+        raise Error('下载方式须为 file 或 speedtest')
     for field in ('mbps', 'reserve_mbps'):
         value = item.get(field)
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
@@ -116,9 +118,8 @@ def legacy_allowance(config, data, directory):
         raise Error('旧任务与统一预算使用不同统计目录，拒绝绕过预算')
     if item['paused']:
         return 0
-    # Apply the global ceiling to compatible legacy sessions too, after their
-    # original test fingerprint has been checked. Never raise the old rate.
-    config['directions']['download']['mbps'] = min(config['directions']['download']['mbps'], effective_rate(item))
+    # Unified settings are authoritative, including live increases as well as decreases.
+    config['directions']['download']['mbps'] = effective_rate(item)
     if any(target['url'] not in item['authorized_urls'] for target in engine.targets(config, 'download')):
         raise Error('原任务包含未授权的 URL，请先 traffic authorize')
     return min(remaining(item, directory, data), ratio.allowance(Context(), item))
@@ -202,7 +203,7 @@ def status(ctx, at=None):
                 monthly_remaining=month_remaining, remaining_bytes=remaining(item, directory, data), jobs=jobs,
                 machine_traffic=machine,
                 legacy_timer_preserved=ctx.path('/etc/systemd/system/traffic-scheduler.timer').exists(),
-                note='仅统计有效负载；协议开销另计。所有工具下载共用计量锁；实际并发为 1。')
+                note='仅统计有效负载；协议开销另计。下载任务共用计量锁；任务内多连接共用一个实时限速器。')
 
 
 def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha256=None,
@@ -240,10 +241,16 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
         if url not in urls:
             raise Error('原任务 URL 已撤销授权')
         offset = job['received_bytes']
+        if job.get('download_mode', 'file') != item.get('download_mode', 'file'):
+            raise Error('原任务下载方式与当前设置不一致，请恢复原方式后续传')
     else:
         offset = 0
         job = dict(id=identifier, url=url, requested_bytes=amount, received_bytes=0, status='running',
-                   started=moment(item['timezone']).isoformat(), sha256=expected_sha256, ignore_ratio=ignore_ratio)
+                   started=moment(item['timezone']).isoformat(), sha256=expected_sha256, ignore_ratio=ignore_ratio,
+                   download_mode=item.get('download_mode', 'file'))
+    from .downloader import Session
+    pacer = Session(ctx, mbps=mbps, pending=job.get('pending_ranges'))
+    pacer.identifier = identifier
     hasher = hashlib.sha256() if expected_sha256 else None
     with engine.locked(directory):
         directory, path, data, current = ledger(ctx, item, at)
@@ -252,7 +259,6 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
         write_json(task_directory(ctx) / 'active.json', dict(id=identifier, pid=os.getpid()))
         write_json(job_path, dict(job, status='running'))
         network = network or engine.Network(engine.load_geo(directory))
-        pacer = engine.Pacer(rate)
         retries = 0
         started = time.monotonic()
         if at is None:
@@ -261,6 +267,8 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
         try:
             with engine.deadline(runtime):
                 while offset < amount:
+                    item = validate(configuration(ctx)['traffic'])
+                    rate = pacer.settings()['rate']
                     flags = read_json(task_directory(ctx) / 'control.json', {})
                     if flags.get('stop') == identifier or flags.get('pause'):
                         job['status'] = 'paused' if flags.get('pause') else 'stopped'
@@ -289,12 +297,13 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
                         retries = 0
                     except engine.ERRORS as exc:
                         retries += 1
-                        if retries >= 3 or not engine.transient(exc):
+                        if getattr(exc, 'attempts_exhausted', False) or retries >= 3 or not engine.transient(exc):
                             raise
                         time.sleep(retries)
                     finally:
                         offset += data['download']['bytes'] - before
                         job['received_bytes'] = offset
+                        job['pending_ranges'] = pacer.pending
                         write_json(job_path, job)
                     if time.monotonic() - started >= runtime:
                         raise engine.Stop('任务运行时间已到')
@@ -304,7 +313,9 @@ def download(ctx, size=None, mbps=None, url=None, max_runtime=None, expected_sha
                     job['status'] = 'completed'
                     job['actual_sha256'] = hasher.hexdigest() if hasher else None
         except engine.Stop:
-            job['status'] = 'interrupted'
+            flags = read_json(task_directory(ctx) / 'control.json', {})
+            job['status'] = ('paused' if configuration(ctx)['traffic']['paused'] or flags.get('pause') else
+                             'stopped' if flags.get('stop') == identifier else 'interrupted')
         except BaseException:
             job['status'] = 'failed'
             raise

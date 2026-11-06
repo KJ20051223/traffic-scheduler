@@ -21,7 +21,7 @@ import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-VERSION = '3.3.1'
+VERSION = '3.4.0'
 PLAN_VERSION = 2
 PLAN_WORK_SECONDS = 40
 # Adjustable estimates, not measurements of real users or upload traffic.
@@ -85,6 +85,8 @@ def retry_delay(value):
 
 
 def transient(error):
+    if getattr(error, 'original', None) is not None:
+        return transient(error.original)
     if isinstance(error, DownloadHTTPError):
         return error.status in (408, 425, 429) or 500 <= error.status <= 599
     return not isinstance(error, (ValueError, ssl.SSLCertVerificationError))
@@ -458,6 +460,9 @@ def download_url(target, amount):
 def transfer(network, direction, item, target, amount, directory, data, path, pacer, offset=0, hasher=None, progress=None):
     if direction != 'download':
         raise ValueError('本版本仅支持下行下载')
+    if hasattr(pacer, 'transfer'):
+        return pacer.transfer(network, direction, item, target, amount, directory, data, path,
+                              offset=offset, hasher=hasher, progress=progress)
     entry = data[direction]
     entry['reserved'] = amount
     atomic_json(path, data)
@@ -580,6 +585,9 @@ def run_session(config, data, path, directory, network, metric='bytes', health=N
     failed = {d: set() for d in DIRECTIONS}
     attempts = {}
     pacers = {d: Pacer(config['directions'][d]['mbps']) for d in DIRECTIONS}
+    if toolkit_home():
+        from vps_toolkit.downloader import legacy_session
+        pacers['download'] = legacy_session()
     stop_at = None if max_bytes is None else data['download'][metric] + max_bytes
     while True:
         if stop_at is not None and data['download'][metric] >= stop_at:

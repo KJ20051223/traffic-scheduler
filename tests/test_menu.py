@@ -175,6 +175,17 @@ class MenuTests(unittest.TestCase):
         watch.assert_called_once_with(self.ctx)
         self.assertIn('实时下载进度', self.out.getvalue())
 
+    def test_parallel_speedtest_menu_preserves_ratio_and_task_state(self):
+        cfg = read_json(self.ctx.config_path)
+        cfg['traffic'].update(strategy='ratio', enabled=True, paused=True)
+        save_config(self.ctx, cfg)
+        from vps_toolkit import traffic
+        with patch.object(traffic, 'initialize_meter', return_value={}):
+            self.assertEqual(self.interact(['10', '16', '2', '4', '3', '0', '0', '0']), 0)
+        item = read_json(self.ctx.config_path)['traffic']
+        self.assertEqual((item['strategy'], item['enabled'], item['paused']), ('ratio', True, True))
+        self.assertEqual((item['download_mode'], item['max_concurrency'], item['mbps']), ('speedtest', 4, 3))
+
     def test_plain_language_reports_keep_agent_limitations_ratio_and_rules(self):
         out = io.StringIO()
         with patch('sys.stdout', out):

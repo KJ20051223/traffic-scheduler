@@ -167,6 +167,8 @@ def traffic_settings(item):
     for key in ('strategy', 'enabled', 'paused', 'daily_bytes', 'monthly_bytes', 'task_bytes', 'mbps', 'region', 'timezone'):
         if key in item:
             row(LABELS[key], size(item[key]) if key.endswith('_bytes') else item[key])
+    row('下载方式', '仅下行测速' if item.get('download_mode') == 'speedtest' else '文件分段下载')
+    row('最大连接数', item['max_concurrency'])
     if item.get('strategy') == 'ratio':
         for key in ('ratio', 'ratio_schedule', 'ratio_interface', 'ratio_tolerance_pct'):
             row(LABELS[key], item.get(key))
@@ -222,6 +224,9 @@ def render_progress(value):
         row('本次任务还剩', size(max(0, value['requested_bytes'] - value['received_bytes'])))
     row('当前有效负载速度', '{:.2f} Mbps'.format(value['speed_mbps']))
     row('设置限速', '{} Mbps'.format(value['configured_mbps']))
+    if 'connections' in value:
+        row('连接数 / 配置上限', '{} / {}'.format(value['connections'], value['max_concurrency']))
+        row('下载方式', '仅下行测速' if value['download_mode'] == 'speedtest' else '文件分段下载')
     if value.get('eta_seconds') is not None:
         row('本次任务估计剩余', '{:.0f} 秒'.format(value['eta_seconds']))
     section('今日下载')

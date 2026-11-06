@@ -23,6 +23,8 @@ def reporter(directory, data, requested=None, job_id=None, offset=0):
                       bytes_per_second=actual / elapsed if elapsed > 0 else 0,
                       status='between_requests' if final else 'receiving' if actual else 'connecting',
                       entry='新下载入口' if job_id else '兼容旧入口 · 当前分块')
+        record['connections'] = getattr(update, 'connections', 1)
+        record['download_mode'] = getattr(update, 'mode', 'file')
         try:
             write_json(Path(directory) / 'progress.json', record)
         except OSError:
@@ -110,6 +112,8 @@ def snapshot(ctx, at=None):
                   requested_bytes=total, percent=min(100, amount * 100 / total) if total else None,
                   task_remaining_bytes=max(0, total - amount) if total else None,
                   speed_mbps=speed * 8 / 1e6, configured_mbps=traffic.effective_rate(item),
+                  connections=live.get('connections', 0) if active else 0,
+                  max_concurrency=item['max_concurrency'], download_mode=item.get('download_mode', 'file'),
                   eta_seconds=max(0, (total - amount) / speed) if total and speed else None,
                   today_bytes=today, today_settled_bytes=data['download']['bytes'],
                   daily_limit_bytes=item['daily_bytes'], remaining_bytes=budget,

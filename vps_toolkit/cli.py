@@ -109,6 +109,7 @@ def parser(human=False):
     for flag in ('timezone', 'times', 'window', 'hourly-weights'):
         q.add_argument('--' + flag)
     q.add_argument('--region', choices=['cn', 'overseas'])
+    q.add_argument('--download-mode', choices=['file', 'speedtest'], help='分段文件下载或仅下行测速')
     q.add_argument('--strategy', choices=['quota', 'ratio'])
     q.add_argument('--ratio', help='上行:下行，例如 1:2')
     q.add_argument('--ratio-interface', help='auto 或出口网卡名称，多个用逗号分隔')
@@ -248,7 +249,7 @@ def traffic_dispatch(ctx, args):
                     raise Error('流量预算须为有限正数')
                 item[name + '_bytes'] = int(value * 1e9)
         for name in ('mbps', 'link_mbps', 'reserve_mbps', 'max_runtime', 'max_concurrency', 'region',
-                     'strategy', 'ratio', 'ratio_interface', 'ratio_schedule', 'ratio_tolerance_pct'):
+                     'strategy', 'ratio', 'ratio_interface', 'ratio_schedule', 'ratio_tolerance_pct', 'download_mode'):
             value = getattr(args, name)
             if value is not None:
                 item[name] = value

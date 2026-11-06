@@ -1,6 +1,6 @@
 # VPS Toolkit
 
-Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.3.1**。
+Linux VPS 命令行工具，合并原 traffic-scheduler 的定时下行、手动下载测试、PF/Realm 管理、云平台检测与客户机 Agent 审计。版本 **3.4.0**。
 
 **升级保留已有下载任务的启停状态、原配置、当日统计与运行中的 Realm；新自动下载任务默认关闭。** 不修改 SSH、防火墙、安全组、系统 Python 或 libc，不新增网站、TLS 监听或远程管理端口。HTTPS 仅作为下载客户端使用。
 
@@ -58,7 +58,33 @@ sudo vps-toolkit traffic download --url 'https://你的已授权文件地址/lar
 sudo vps-toolkit traffic status
 ```
 
-`traffic test` 是 `traffic download` 的别名，默认 10 MB。可加 `--mbps 2 --max-runtime 120`，只能进一步降低配置上限；可加 `--sha256 完整摘要` 校验本次逻辑下载内容。URL 必须属于配置地区（默认大陆），可 `traffic configure --region overseas` 切换海外。
+`traffic test` 是 `traffic download` 的别名，默认 10 MB。可加 `--mbps 2 --max-runtime 120`，只能进一步降低配置上限；可加 `--sha256 完整摘要` 校验本次逻辑下载内容（有序单连接）。URL 必须属于配置地区（默认大陆），可 `traffic configure --region overseas` 切换海外。
+
+## 多连接与仅下行测速（3.4.0）
+
+菜单 **10 → 16 多连接 / 仅下行测速 / 实时限速**。所有连接共用一个总限速器，设置 5 Mbps、4 个连接时，合计按 5 Mbps 控制。新配置默认 4 个连接，支持 1–32；升级保留已有并发数、速度、配额、比例与任务状态。要给旧配置开启并行：
+
+```sh
+sudo vps-toolkit traffic configure --max-concurrency 4 --mbps 5
+# 分段文件：多连接读取不同偏移，需要源站支持 Range
+sudo vps-toolkit traffic configure --download-mode file
+# 仅下行测速：独立并发读取授权资源，不执行上传测速
+sudo vps-toolkit traffic configure --download-mode speedtest
+sudo vps-toolkit traffic test --mb 20
+```
+
+测速模式也使用当前已授权 URL、地区检查、有限字节数、日/月预算和累计比例；可使用返回测试数据的 HTTP(S) 接口，也可使用已有文件源。数据读取后自动清理，不调用会自动上传、探测全部节点或无限跑满带宽的外部测速程序。Cloudflare `https://speed.cloudflare.com/__down` 属于海外地区，使用前须明确授权并切换地区；大陆可继续使用已授权的大陆文件源。没有新增未经验证的大陆测速端点。
+
+运行中执行下列命令即可调速，**不需要暂停、重启或等待本次请求结束**。配置最多约 0.2 秒复核一次；调高/调低均生效，并清除旧速率累积的令牌。显式手动任务 `--mbps` 仍是该任务的额外上限。改连接数或下载方式在后续分块/任务生效。
+
+```sh
+sudo vps-toolkit traffic configure --mbps 3
+sudo vps-toolkit traffic watch
+```
+
+限速在读取正文前统一分配许可，没有启动突发额度；令牌缓冲最多约 50 毫秒工作量，每次读取最多约 25 毫秒工作量 / 16 KiB。它控制本工具接收的**有效负载**，不按连接倍增；TCP/TLS 开销、重传、已经在途或内核缓冲的数据、其他程序流量不受这个应用层限速器控制。网卡的瞬时速度和短采样窗可略高，不能承诺任意瞬间的整机链路绝不超过设置值，也不能绕过云厂商已生效的限速。多连接改善单连接瓶颈，不保证跑满。
+
+配额由主线程一次预留、汇总结算，工作线程不各写一份额度。文件模式暂停/中断时保存未完成的分段，恢复时只补空缺，避免将累计字节数误当作连续偏移。带 SHA256 的文件任务使用单连接按顺序校验，测速模式拒绝文件 SHA256。并行任务临时错误按各自未完成范围最多重试 3 次，失败和暂停均清理临时内容并计入已实际收到的字节。
 
 **下载内容流式读取，逐块计量并自动清理临时内容，不保存完整文件。** 正常完成、失败和中断都会执行清理；磁盘只保留配置、计量和任务状态。多块请求使用连续偏移，不反复读取文件开头；恢复需要源站支持 Range。HTTP 403/418、TLS 错误会明确报错，临时网络错误最多重试 3 次，不无限重试。没有承诺任何公共镜像全天可用。
 
@@ -95,7 +121,7 @@ sudo vps-toolkit traffic configure --window 00:00-23:59 --times ''
 sudo vps-toolkit traffic enable
 ```
 
-旧 traffic-scheduler 仍启用时，`enable` 会提示先确认替换；明确迁移用 `traffic enable --replace-legacy`，这才会停止旧定时入口并启用新入口。也可以继续保留旧任务，使用原 `traffic-scheduler` 命令独立操作；新统一预算和更低速度上限同时约束兼容旧任务。统一工具的自动任务仍保持关闭，避免双份调度。
+旧 traffic-scheduler 仍启用时，`enable` 会提示先确认替换；明确迁移用 `traffic enable --replace-legacy`，这才会停止旧定时入口并启用新入口。也可以继续保留旧任务，使用原 `traffic-scheduler` 命令独立操作；统一预算和实时总限速同时约束兼容旧任务。统一工具的自动任务仍保持关闭，避免双份调度。
 
 默认随机分散，按速率与任务预算切块，每分钟最多一次、单次约 40 秒工作量；午夜有随机等待，错过的时段会在剩余窗口重新安排。`estimated` 为可调整的作息估算权重，**不是实测真实用户行为**。新配置默认均匀权重、系统时区；旧配置保留北京时间和权重。已有统计时禁止直接改日期时区，避免重复额度。
 
@@ -109,7 +135,7 @@ sudo vps-toolkit traffic configure --link-mbps 10 --reserve-mbps 4 --mbps 8
 sudo vps-toolkit traffic disable
 ```
 
-预留通过限制本工具下载速率实现，不是系统 QoS；不会修改 tc/防火墙或保证外部程序带宽。实际下载并发恒为 **1**，`--max-concurrency` 只设上限，不会启动多个抢占共享预算的下载。默认每任务 100 MB、最长 300 秒、每日 20 GB、每月 600 GB、5 Mbps。低速、窄窗口、资源故障或大额度可能导致当日无法完成，预算是上限，不是完成承诺。
+预留通过限制本工具下载速率实现，不是系统 QoS；不会修改 tc/防火墙或保证外部程序带宽。任务内按 `--max-concurrency` 启动多连接，共用总限速和同一份预算；不同任务仍共用计量锁。默认每任务 100 MB、最长 300 秒、每日 20 GB、每月 600 GB、5 Mbps。低速、窄窗口、资源故障或大额度可能导致当日无法完成，预算是上限，不是完成承诺。
 
 ## 按整机累计上行:下行比例补下载（3.1.0）
 

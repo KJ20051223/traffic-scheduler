@@ -99,7 +99,8 @@ class ToolkitTests(unittest.TestCase):
         self.ctx.path('/proc').mkdir()
         atomic(self.ctx.path('/etc/os-release'), 'ID=ubuntu\nVERSION_ID="22.04"\n')
         self.cfg = defaults()
-        self.cfg['traffic'].update(timezone='system', authorized_urls=['http://example.com/file'], task_bytes=10_000_000)
+        self.cfg['traffic'].update(timezone='system', authorized_urls=['http://example.com/file'], task_bytes=10_000_000,
+                                   max_concurrency=1)
         save_config(self.ctx, self.cfg)
         self.at = dt.datetime(2026, 11, 3, 12, tzinfo=dt.timezone(dt.timedelta(hours=8)))
         if os.name != 'posix':
@@ -108,7 +109,7 @@ class ToolkitTests(unittest.TestCase):
             self.addCleanup(self.lock_patch.stop)
         Handler.ranges = []
     def download(self, **kwargs):
-        with patch.object(traffic.engine, 'Pacer', NoPacer):
+        with patch('vps_toolkit.downloader.RateGate.acquire', side_effect=lambda n: min(n, 32768)):
             return traffic.download(self.ctx, network=LocalNetwork(self.server), at=self.at, **kwargs)
     def test_new_schedule_disabled_and_manual_exact_bytes_with_hash(self):
         self.assertFalse(self.cfg['traffic']['enabled'])

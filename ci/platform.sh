@@ -14,7 +14,7 @@ sh ./install.sh --no-wizard
 vps-toolkit --version
 vps-toolkit traffic status
 python_bin=$(sed -n 's/^exec "\([^"]*\)".*/\1/p' /usr/local/bin/vps-toolkit)
-"$python_bin" -m unittest -v tests.test_toolkit tests.test_ratio tests.test_menu tests.test_agent_batch tests.test_progress compat.test_traffic_scheduler
+"$python_bin" -m unittest -v tests.test_toolkit tests.test_ratio tests.test_menu tests.test_agent_batch tests.test_progress tests.test_downloader compat.test_traffic_scheduler
 "$python_bin" -c 'import json; c=json.load(open("/etc/vps-toolkit/config.json")); assert c["traffic"]["enabled"] is False; assert c["traffic"]["authorized_urls"] == []'
 # Repeat offline installation without changing task state or requiring GitHub.
 sh ./install.sh --offline --no-wizard

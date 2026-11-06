@@ -142,7 +142,7 @@ def defaults():
             'forwarder': {'config': '/etc/realm/config.json', 'binary': '/usr/local/bin/realm', 'service': 'realm'},
             'traffic': {'enabled': False, 'timezone': 'system', 'daily_bytes': 20_000_000_000,
                         'monthly_bytes': 600_000_000_000, 'task_bytes': 100_000_000,
-                        'mbps': 5.0, 'max_runtime': 300, 'max_concurrency': 1,
+                        'mbps': 5.0, 'max_runtime': 300, 'max_concurrency': 4, 'download_mode': 'file',
                         'link_mbps': None, 'reserve_mbps': 0, 'authorized_urls': [],
                         'region': 'cn', 'state_dir': '/var/lib/traffic-scheduler',
                         'times': [], 'window': ['00:00', '23:59'], 'paused': False,

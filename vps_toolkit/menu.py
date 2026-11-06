@@ -295,6 +295,17 @@ def configure_time(ctx):
     run(ctx, command)
 
 
+def configure_download(ctx):
+    item = configuration(ctx)['traffic']
+    print('所有连接共用总限速；测速仅下行，数据自动清理，仍计入日/月预算。\n')
+    mode = ask('方式：1 文件分段 / 2 仅下行测速', '2' if item.get('download_mode') == 'speedtest' else '1')
+    if mode not in ('1', '2'):
+        raise Error('方式请选择 1 或 2')
+    run(ctx, ['traffic', 'configure', '--download-mode', 'file' if mode == '1' else 'speedtest',
+              '--max-concurrency', ask('最大连接数（1–32，建议 4）', item['max_concurrency']),
+              '--mbps', ask('所有连接合计限速 Mbps（运行中修改生效）', item['mbps'])])
+
+
 def ratio_seed(ctx):
     print('输入此刻整机的累计总量，含已有历史；不是要增加的差值。\n不会清零本工具日/月已用额度。\n')
     run(ctx, ['traffic', 'ratio-seed', '--upload-gb', ask('累计上行 GB'), '--download-gb', ask('累计下行 GB')])
@@ -331,7 +342,8 @@ def traffic_menu(ctx):
                ('12', '添加授权下载资源', lambda: resource(ctx)),
                ('13', '移除授权下载资源', lambda: resource(ctx, True)),
                ('14', '实时下载进度（每秒刷新）', lambda: watch_progress(ctx)),
-               ('15', '切换下载模式（固定额度 / 累计比例）', lambda: configure_strategy(ctx))]
+               ('15', '切换下载模式（固定额度 / 累计比例）', lambda: configure_strategy(ctx)),
+               ('16', '多连接 / 仅下行测速 / 实时限速', lambda: configure_download(ctx))]
     submenu(ctx, '下载任务调度', entries)
 
 
