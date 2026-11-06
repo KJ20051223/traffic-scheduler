@@ -6,7 +6,7 @@ Windows / Python 3.13 共 **181 项回归通过，8 项 POSIX 专属检查跳过
 
 运行时代码：`bd238a51c34fb3a403a21ebd4c0c1c57e8dd3f40`；安装器 SHA256：`03810a8d7e4d9434b7d3cac654f0fe8a8bae83d1cdf27f299e74b788bda65a28`。暂停续传测试在 Alpine 初次运行时于收到正文前触发了固定时长暂停，已改为实际进度触发，验证提交 `6b58aaa3e2dffe075be9758379eec833c7d6bbb3`；运行时代码和安装器摘要未改变。
 
-最终跨系统验证：[工作流 42197484023](https://github.com/KJ20051223/vps-toolkit/actions/runs/42197484023)。该工作流覆盖 Linux 单元测试/systemd 沙箱、16 个发行版安装/回归/离线重装及 x86_64/ARM64 Realm TCP/UDP；已确认 Linux 主测试与 Alpine 3.23 通过，其余结果随工作流更新。
+最终跨系统验证：[工作流 42197484023](https://github.com/KJ20051223/vps-toolkit/actions/runs/42197484023) 的 **19 个任务全部通过**，包含 Linux 单元测试/systemd 沙箱、16 个发行版安装/回归/离线重装及 x86_64/ARM64 Realm TCP/UDP；Alpine 3.23、TencentOS 4 和 Alibaba Cloud Linux 3 均通过。修正测试触发方式后的最终工作流没有跳过或重试失败检查。
 
 随机间隔增加等待时间，会降低全天实际完成量；本次没有证明可避免云平台限速，应用层有效负载限速与物理网卡瞬时速率的区别保持不变。源文件大小已核对[清华镜像目录](https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/24.04/)，原 24.04.4 server ISO 约 3.2 GiB；原来约 0.5 MiB/连接来自脚本的 2 MiB 总分块限制。
 
