@@ -178,28 +178,40 @@ class DownloaderTests(unittest.TestCase):
     def test_pause_parallel_then_resume_fills_holes_without_redownloading_completed_ranges(self):
         self.cfg['traffic']['mbps'] = 2
         save_config(self.ctx, self.cfg)
+        target = 2_000_000
+        failures = []
         def pause_later():
-            time.sleep(0.35)
-            traffic.set_control(self.ctx, 'pause')
+            try:
+                deadline = time.monotonic() + 6
+                while time.monotonic() < deadline:
+                    live = read_json(self.ctx.path('/var/lib/traffic-scheduler/progress.json'), {})
+                    if 0 < live.get('received_bytes', 0) < target:
+                        traffic.set_control(self.ctx, 'pause')
+                        return
+                    time.sleep(0.01)
+                raise AssertionError('no in-flight payload progress observed before pause')
+            except BaseException as exc:
+                failures.append(exc)
         editor = threading.Thread(target=pause_later)
         editor.start()
         try:
-            job = self.download(size=400_000)
+            job = self.download(size=target)
         finally:
             editor.join()
+        self.assertFalse(failures)
         self.assertEqual(job['status'], 'paused')
         self.assertGreater(job['received_bytes'], 0)
         self.assertTrue(job['pending_ranges'])
         pending = job['pending_ranges']
-        self.assertEqual(sum(length for _, length in pending) + job['received_bytes'], 400_000)
+        self.assertEqual(sum(length for _, length in pending) + job['received_bytes'], target)
         Handler.ranges = []
         traffic.set_control(self.ctx, 'resume')
         self.cfg['traffic'].update(mbps=8, max_concurrency=1)
         save_config(self.ctx, self.cfg)
         job = self.download(job_id=job['id'])
-        self.assertEqual((job['status'], job['received_bytes']), ('completed', 400_000))
+        self.assertEqual((job['status'], job['received_bytes']), ('completed', target))
         self.assertEqual(sorted(Handler.ranges), sorted((first, first + length - 1) for first, length in pending))
-        self.assertEqual(self.ledger()['bytes'], 400_000)
+        self.assertEqual(self.ledger()['bytes'], target)
 
     def test_legacy_session_uses_live_global_rate_and_new_parallel_downloader(self):
         config = traffic.engine.default_config()
